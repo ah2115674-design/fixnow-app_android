@@ -193,6 +193,9 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
         loadCustomerInfo()
         loadTechnicianInfo()
         listenToActiveBookings()
+        loadCoupons()
+        loadFraudAlerts()
+        loadPayoutWithdrawals()
 
         // Secure Session Restoration Startup Logic
         viewModelScope.launch {
@@ -212,13 +215,29 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
                             _currentMode.value = "Customer"
                             addPushNotification("🔓 Session restored! Welcome back, ${profile.name}.")
                         } else {
-                            val localMatch = repository.allCustomers.first().firstOrNull()
-                            if (localMatch != null) {
-                                _customerPhone.value = localMatch.phone
-                                _activeCustomer.value = localMatch
-                                _currentMode.value = "Customer"
-                                addPushNotification("🔓 Session restored! Welcome back, ${localMatch.name}.")
-                            }
+                            // UUID not in local Room (new device) — fetch from Supabase by UUID
+                            try {
+                                val remoteRecords = SupabaseClient.apiService.getCustomerById(
+                                    id = "eq.$savedUid",
+                                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                                    authHeader = "Bearer $savedToken"
+                                )
+                                if (remoteRecords.isNotEmpty()) {
+                                    val dto = remoteRecords[0]
+                                    val restored = CustomerProfile(
+                                        phone = dto.phone,
+                                        uuid = dto.id,
+                                        name = dto.name,
+                                        email = dto.email,
+                                        city = dto.city
+                                    )
+                                    repository.registerCustomer(restored)
+                                    _customerPhone.value = restored.phone
+                                    _activeCustomer.value = restored
+                                    _currentMode.value = "Customer"
+                                    addPushNotification("🔓 Session restored from cloud! Welcome back, ${restored.name}.")
+                                }
+                            } catch (e: Exception) { e.printStackTrace() }
                         }
                     } else if (savedRole == "technician") {
                         val profile = repository.allTechnicians.first().firstOrNull { it.uuid == savedUid }
@@ -228,13 +247,40 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
                             _currentMode.value = "Technician"
                             addPushNotification("🔓 Session restored! Welcome back, ${profile.name}.")
                         } else {
-                            val localMatch = repository.allTechnicians.first().firstOrNull()
-                            if (localMatch != null) {
-                                _techPhone.value = localMatch.phone
-                                _activeTechnician.value = localMatch
-                                _currentMode.value = "Technician"
-                                addPushNotification("🔓 Session restored! Welcome back, ${localMatch.name}.")
-                            }
+                            // UUID not in local Room (new device) — fetch from Supabase
+                            try {
+                                val remoteTechs = SupabaseClient.apiService.getTechnicianById(
+                                    id = "eq.$savedUid",
+                                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                                    authHeader = "Bearer $savedToken"
+                                )
+                                if (remoteTechs.isNotEmpty()) {
+                                    val dto = remoteTechs[0]
+                                    val restored = TechnicianProfile(
+                                        phone = dto.phone,
+                                        uuid = dto.id,
+                                        name = dto.name,
+                                        category = dto.category,
+                                        subCategory = dto.subCategory ?: "",
+                                        city = dto.city,
+                                        cnic = dto.cnic,
+                                        selfieUrl = dto.selfieUrl ?: "",
+                                        bankDetails = dto.bankDetails ?: "",
+                                        isApproved = dto.isApproved,
+                                        isOnline = dto.isOnline,
+                                        rating = dto.rating,
+                                        totalJobs = dto.totalJobs,
+                                        acceptanceRate = dto.acceptanceRate,
+                                        latitude = dto.latitude,
+                                        longitude = dto.longitude
+                                    )
+                                    repository.registerTechnician(restored)
+                                    _techPhone.value = restored.phone
+                                    _activeTechnician.value = restored
+                                    _currentMode.value = "Technician"
+                                    addPushNotification("🔓 Session restored from cloud! Welcome back, ${restored.name}.")
+                                }
+                            } catch (e: Exception) { e.printStackTrace() }
                         }
                     } else if (savedRole == "admin") {
                         _isAdminAuthorized.value = true
@@ -560,6 +606,19 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
             loadTechnicianInfo()
             val statusStr = if (online) "Online" else "Offline"
             addPushNotification("Availability status set to $statusStr.")
+            // Sync online/offline status to Supabase so matchmaker can find this tech
+            try {
+                val tech = repository.getTechnician(phone)
+                if (tech != null && tech.uuid.isNotEmpty()) {
+                    SupabaseClient.apiService.updateTechnicianProfile(
+                        id = "eq.${tech.uuid}",
+                        body = mapOf("is_online" to online),
+                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                        authHeader = getBearerToken()
+                    )
+                    addPushNotification("🟢 Online status synced to Supabase: $statusStr")
+                }
+            } catch (e: Exception) { e.printStackTrace() }
         }
     }
 
@@ -1200,7 +1259,7 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
             val response = SupabaseClient.apiService.findNearbyTechniciansRpc(
                 TechDiscoveryParams(booking.latitude, booking.longitude, booking.customerCity, booking.serviceCategory),
                 BuildConfig.SUPABASE_ANON_KEY,
-                "Bearer ${BuildConfig.SUPABASE_ANON_KEY}"
+                getBearerToken()
             )
             if (response.isSuccessful && !response.body().isNullOrEmpty()) {
                 val discoveryList = response.body()!!
@@ -1302,9 +1361,9 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
                             technicianId = tech.uuid
                         ),
                         apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                        bearerToken = "Bearer ${BuildConfig.SUPABASE_ANON_KEY}"
+                        bearerToken = getBearerToken()
                     )
-                    
+
                     if (rpcResponse.isSuccessful) {
                         success = rpcResponse.body() ?: false
                         if (success) {
@@ -1355,6 +1414,17 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
                 declinedTechnicians = updatedDeclined
             )
             repository.updateBooking(updated)
+            // Sync decline to Supabase so other devices see the reset
+            try {
+                if (booking.supabaseId != null) {
+                    SupabaseClient.apiService.updateBookingStatus(
+                        id = "eq.${booking.supabaseId}",
+                        body = mapOf("status" to "Requested", "technician_phone" to null, "technician_name" to null),
+                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                        authHeader = getBearerToken()
+                    )
+                }
+            } catch (e: Exception) { e.printStackTrace() }
             addPushNotification("Technician declined request. Re-routing dispatch to the next nearest expert...")
 
             // Cascading Dispatch: Immediately search for the next nearest qualified tech!
@@ -1380,7 +1450,20 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
             }
 
             repository.updateBookingStatus(bookingId, nextStatus)
-            
+
+            // Sync job status to Supabase so customer's device gets the live update
+            try {
+                val refreshed = repository.getBooking(bookingId)
+                if (refreshed?.supabaseId != null) {
+                    SupabaseClient.apiService.updateBookingStatus(
+                        id = "eq.${refreshed.supabaseId}",
+                        body = mapOf("status" to nextStatus),
+                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                        authHeader = getBearerToken()
+                    )
+                }
+            } catch (e: Exception) { e.printStackTrace() }
+
             val notificationMsg = when (nextStatus) {
                 "Technician En Route" -> "🚀 ${_activeTechnician.value?.name ?: "Technician"} is now en route to your household in ${booking.customerCity}!"
                 "Arrived" -> "🔔 Knock knock! Technician has arrived at your address: ${booking.customerAddress}!"
@@ -1599,6 +1682,23 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
                 techLongitude = tech.longitude
             )
             repository.updateBooking(updated)
+            // Sync admin manual assignment to Supabase
+            try {
+                if (booking.supabaseId != null) {
+                    SupabaseClient.apiService.updateBookingStatus(
+                        id = "eq.${booking.supabaseId}",
+                        body = mapOf(
+                            "status" to "Assigned",
+                            "technician_id" to tech.uuid,
+                            "technician_phone" to tech.phone,
+                            "technician_name" to tech.name,
+                            "is_manual_assign" to true
+                        ),
+                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                        authHeader = getBearerToken()
+                    )
+                }
+            } catch (e: Exception) { e.printStackTrace() }
             addPushNotification("🛠️ Admin Override: Manually assigned job #$bookingId to ${tech.name}!")
         }
     }
@@ -1607,6 +1707,18 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             repository.updateBookingStatus(bookingId, "Cancelled")
             addPushNotification("❌ Booking #$bookingId has been cancelled by customer/administrator.")
+            // Sync cancellation to Supabase
+            try {
+                val booking = repository.getBooking(bookingId)
+                if (booking?.supabaseId != null) {
+                    SupabaseClient.apiService.updateBookingStatus(
+                        id = "eq.${booking.supabaseId}",
+                        body = mapOf("status" to "Cancelled"),
+                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                        authHeader = getBearerToken()
+                    )
+                }
+            } catch (e: Exception) { e.printStackTrace() }
         }
     }
 
@@ -1649,92 +1761,172 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
     // ----------------------------------------------------
     // SUPPORT & COMPLAINTS WORKFLOWS
     // ----------------------------------------------------
-    private val _supportTickets = MutableStateFlow<List<SupportTicket>>(listOf(
-        SupportTicket(
-            id = 101,
-            customerPhone = "03001234567",
-            customerName = "Ahmad Malik",
-            bookingId = 1L,
-            category = "Pricing Dispute",
-            description = "The technician Muhammad Rizwan asked for extra material charges of Rs. 1000 without sharing a receipt.",
-            status = "Escalated",
-            timestamp = System.currentTimeMillis() - 7200000,
-            chatMessages = listOf(
-                SupportMessage("Customer", "I would like to file a formal complaint regarding my electrical booking."),
-                SupportMessage("Support Agent", "Ahmad, we have received your complaint. Your ticket has been escalated to our Audit department and a senior auditor is looking into Muhammad Rizwan's profile.")
-            ),
-            slaTimerMinutes = 12
-        )
-    ))
+    private val _supportTickets = MutableStateFlow<List<SupportTicket>>(emptyList())
     val supportTickets: StateFlow<List<SupportTicket>> = _supportTickets.asStateFlow()
 
-    private val _coupons = MutableStateFlow<List<Coupon>>(listOf(
-        Coupon("FIXNOW10", 150.0, "Get flat Rs. 150 off on your first service booking!"),
-        Coupon("PAKISTAN50", 250.0, "Special National Discount - Flat Rs. 250 off."),
-        Coupon("REFER500", 500.0, "Referral discount: Zainab's Invite", isReferral = true, refereeName = "Zainab")
-    ))
+    fun loadSupportTickets(customerPhone: String? = null) {
+        viewModelScope.launch {
+            try {
+                val bearer = getBearerToken()
+                val dtos = if (customerPhone != null) {
+                    SupabaseClient.apiService.getSupportTickets(
+                        phone = "eq.$customerPhone",
+                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                        authHeader = bearer
+                    )
+                } else {
+                    SupabaseClient.apiService.getAllSupportTickets(
+                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                        authHeader = bearer
+                    )
+                }
+                // Fetch messages for each ticket
+                val tickets = dtos.map { dto ->
+                    val msgs = try {
+                        SupabaseClient.apiService.getSupportMessages(
+                            ticketId = "eq.${dto.id}",
+                            apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                            authHeader = bearer
+                        ).map { m -> SupportMessage(m.sender, m.message, 0L) }
+                    } catch (e: Exception) { emptyList() }
+                    SupportTicket(
+                        id = dto.id ?: 0L,
+                        customerPhone = dto.customerPhone,
+                        customerName = dto.customerName,
+                        bookingId = dto.bookingId,
+                        category = dto.category,
+                        description = dto.description,
+                        status = dto.status,
+                        timestamp = System.currentTimeMillis(),
+                        chatMessages = msgs,
+                        slaTimerMinutes = dto.slaTimerMinutes
+                    )
+                }
+                _supportTickets.value = tickets
+            } catch (e: Exception) { e.printStackTrace() }
+        }
+    }
+
+    private val _coupons = MutableStateFlow<List<Coupon>>(emptyList())
     val coupons: StateFlow<List<Coupon>> = _coupons.asStateFlow()
+
+    fun loadCoupons() {
+        viewModelScope.launch {
+            try {
+                val dtos = SupabaseClient.apiService.getCoupons(
+                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                    authHeader = getBearerToken()
+                )
+                _coupons.value = dtos.map { Coupon(it.code, it.discountAmount, it.description, it.isReferral, it.refereeName) }
+            } catch (e: Exception) { e.printStackTrace() }
+        }
+    }
 
     val activeDiscountCode = MutableStateFlow("")
     val appliedDiscountAmount = MutableStateFlow(0.0)
 
     fun createSupportTicket(category: String, description: String, bookingId: Long?) {
         val customer = _activeCustomer.value ?: return
-        val newId = (_supportTickets.value.map { it.id }.maxOrNull() ?: 100) + 1
-        val newTicket = SupportTicket(
-            id = newId,
-            customerPhone = customer.phone,
-            customerName = customer.name,
-            bookingId = bookingId,
-            category = category,
-            description = description,
-            status = "Open",
-            timestamp = System.currentTimeMillis(),
-            chatMessages = listOf(
-                SupportMessage("Customer", description)
-            )
-        )
-        _supportTickets.update { it + newTicket }
-        addPushNotification("🎫 Ticket #${newId} filed on category '$category'. Response SLA: 15 mins.")
+        viewModelScope.launch {
+            try {
+                val dto = SupportTicketDto(
+                    customerPhone = customer.phone,
+                    customerName = customer.name,
+                    bookingId = bookingId,
+                    category = category,
+                    description = description,
+                    status = "Open"
+                )
+                val resp = SupabaseClient.apiService.createSupportTicket(
+                    ticket = dto,
+                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                    authHeader = getBearerToken()
+                )
+                if (resp.isSuccessful && resp.body() != null) {
+                    val created = resp.body()!![0]
+                    // Also post the first message
+                    SupabaseClient.apiService.createSupportMessage(
+                        message = SupportMessageDto(ticketId = created.id!!, sender = "Customer", message = description),
+                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                        authHeader = getBearerToken()
+                    )
+                    addPushNotification("🎫 Ticket #${created.id} filed on category '$category'. Response SLA: 15 mins.")
+                    loadSupportTickets(customer.phone)
+                } else {
+                    addPushNotification("⚠️ Could not file ticket: ${resp.errorBody()?.string()}")
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                addPushNotification("⚠️ Network error filing support ticket.")
+            }
+        }
     }
 
     fun submitSupportAgentReply(ticketId: Long, reply: String) {
-        _supportTickets.update { tickets ->
-            tickets.map { ticket ->
-                if (ticket.id == ticketId) {
-                    val updatedMessages = ticket.chatMessages + SupportMessage("Support Agent", reply)
-                    ticket.copy(chatMessages = updatedMessages, status = "In Progress")
-                } else ticket
+        viewModelScope.launch {
+            try {
+                SupabaseClient.apiService.createSupportMessage(
+                    message = SupportMessageDto(ticketId = ticketId, sender = "Support Agent", message = reply),
+                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                    authHeader = getBearerToken()
+                )
+                SupabaseClient.apiService.updateSupportTicket(
+                    id = "eq.$ticketId",
+                    body = mapOf("status" to "In Progress"),
+                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                    authHeader = getBearerToken()
+                )
+            } catch (e: Exception) { e.printStackTrace() }
+            // Update local state
+            _supportTickets.update { tickets ->
+                tickets.map { ticket ->
+                    if (ticket.id == ticketId) {
+                        val updatedMessages = ticket.chatMessages + SupportMessage("Support Agent", reply)
+                        ticket.copy(chatMessages = updatedMessages, status = "In Progress")
+                    } else ticket
+                }
             }
-        }
-        val ticket = _supportTickets.value.firstOrNull { it.id == ticketId }
-        if (ticket != null) {
-            addPushNotification("💬 Support Desk: Sent message to ${ticket.customerName}.")
-            addWhatsAppUpdate(ticket.customerPhone, "FixNow Support: A support companion has replied to your Ticket #${ticket.id}. Please view details in-app.")
+            val ticket = _supportTickets.value.firstOrNull { it.id == ticketId }
+            if (ticket != null) {
+                addPushNotification("💬 Support Desk: Sent message to ${ticket.customerName}.")
+                addWhatsAppUpdate(ticket.customerPhone, "FixNow Support: A support companion has replied to your Ticket #${ticket.id}. Please view details in-app.")
+            }
         }
     }
 
     fun submitCustomerSupportMessage(ticketId: Long, message: String) {
-        _supportTickets.update { tickets ->
-            tickets.map { ticket ->
-                if (ticket.id == ticketId) {
-                    val updatedMessages = ticket.chatMessages + SupportMessage("Customer", message)
-                    ticket.copy(chatMessages = updatedMessages)
-                } else ticket
+        viewModelScope.launch {
+            try {
+                SupabaseClient.apiService.createSupportMessage(
+                    message = SupportMessageDto(ticketId = ticketId, sender = "Customer", message = message),
+                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                    authHeader = getBearerToken()
+                )
+            } catch (e: Exception) { e.printStackTrace() }
+            _supportTickets.update { tickets ->
+                tickets.map { ticket ->
+                    if (ticket.id == ticketId) {
+                        val updatedMessages = ticket.chatMessages + SupportMessage("Customer", message)
+                        ticket.copy(chatMessages = updatedMessages)
+                    } else ticket
+                }
             }
         }
     }
 
     fun updateTicketStatus(ticketId: Long, newStatus: String) {
-        _supportTickets.update { tickets ->
-            tickets.map { ticket ->
-                if (ticket.id == ticketId) {
-                    ticket.copy(status = newStatus)
-                } else ticket
+        viewModelScope.launch {
+            try {
+                SupabaseClient.apiService.updateSupportTicket(
+                    id = "eq.$ticketId",
+                    body = mapOf("status" to newStatus),
+                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                    authHeader = getBearerToken()
+                )
+            } catch (e: Exception) { e.printStackTrace() }
+            _supportTickets.update { tickets ->
+                tickets.map { if (it.id == ticketId) it.copy(status = newStatus) else it }
             }
-        }
-        val ticket = _supportTickets.value.firstOrNull { it.id == ticketId }
-        if (ticket != null) {
             addPushNotification("🚨 Ticket #${ticketId} status changed to $newStatus.")
         }
     }
@@ -1756,9 +1948,21 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
     fun createCoupon(code: String, discount: Double, desc: String) {
         val cleanCode = code.trim().uppercase()
         if (_coupons.value.any { it.code == cleanCode }) return
-        val newCoupon = Coupon(cleanCode, discount, desc)
-        _coupons.update { it + newCoupon }
-        addPushNotification("🎟️ New promotional code generated: $cleanCode")
+        viewModelScope.launch {
+            try {
+                SupabaseClient.apiService.createCoupon(
+                    coupon = CouponDto(code = cleanCode, discountAmount = discount, description = desc),
+                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                    authHeader = getBearerToken()
+                )
+                loadCoupons()
+                addPushNotification("🎟️ New promotional code saved to Supabase: $cleanCode")
+            } catch (e: Exception) {
+                e.printStackTrace()
+                _coupons.update { it + Coupon(cleanCode, discount, desc) }
+                addPushNotification("🎟️ New promotional code generated: $cleanCode")
+            }
+        }
     }
 
     fun removeAppliedDiscount() {
@@ -1769,20 +1973,47 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
     // ----------------------------------------------------
     // ENTERPRISE ADMIN EXTRA WORKFLOWS (FRAUD, PAYMENTS, BROADCAST)
     // ----------------------------------------------------
-    private val _fraudAlerts = MutableStateFlow<List<FraudAlert>>(listOf(
-        FraudAlert(1, "Suspect GPS Relocation", "HIGH", "Muhammad Rizwan's logged GPS location updated directly from Gulberg Lahore to F-7 Islamabad within 4 seconds.", System.currentTimeMillis() - 1000 * 60 * 18, "03009988771"),
-        FraudAlert(2, "Duplicate IP Sign-In", "LOW", "Technician and Customer accounts with overlapping referral codes logged from identical terminal fingerprints.", System.currentTimeMillis() - 1000 * 60 * 45, "03001122334"),
-        FraudAlert(3, "Substandard Rate Gouging", "CRITICAL", "Main service bill totaled Rs. 14,000 on category estimated at max Rs. 3,500. Suspicion of offline extortion billing.", System.currentTimeMillis() - 1000 * 60 * 120, "03125559092")
-    ))
+    private val _fraudAlerts = MutableStateFlow<List<FraudAlert>>(emptyList())
     val fraudAlerts: StateFlow<List<FraudAlert>> = _fraudAlerts.asStateFlow()
 
-    private val _paymentWithdrawals = MutableStateFlow<List<PaymentWithdrawal>>(listOf(
-        PaymentWithdrawal("TXN-3019A", "Zahid Iqbal", "JazzCash Payout", 4200.0, "JazzCash - 03001234411", "Pending Approved", System.currentTimeMillis() - 1000 * 60 * 30),
-        PaymentWithdrawal("TXN-3023M", "Farhan Saeed", "EasyPaisa Cash-Out", 8400.0, "EasyPaisa - 03217744112", "Pending Approved", System.currentTimeMillis() - 1000 * 60 * 65),
-        PaymentWithdrawal("TXN-1092Q", "Muhammad Rizwan", "Bank Transfer RELEASE", 32000.0, "HBL Bank - PK00UNIL01920392819", "Under Compliance Hold", System.currentTimeMillis() - 1000 * 60 * 180),
-        PaymentWithdrawal("TXN-0892B", "Yasir Rasheed", "JazzCash Payout", 1500.0, "JazzCash - 03009988112", "Released & Processed", System.currentTimeMillis() - 1000 * 60 * 300)
-    ))
+    fun loadFraudAlerts() {
+        viewModelScope.launch {
+            try {
+                val dtos = SupabaseClient.apiService.getFraudAlerts(
+                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                    authHeader = getBearerToken()
+                )
+                _fraudAlerts.value = dtos.map {
+                    FraudAlert(
+                        id = it.id?.toInt() ?: 0,
+                        title = it.title,
+                        severity = it.severity,
+                        description = it.description,
+                        timestamp = System.currentTimeMillis(),
+                        associatedPhone = it.associatedPhone,
+                        isResolved = it.isResolved
+                    )
+                }
+            } catch (e: Exception) { e.printStackTrace() }
+        }
+    }
+
+    private val _paymentWithdrawals = MutableStateFlow<List<PaymentWithdrawal>>(emptyList())
     val paymentWithdrawals: StateFlow<List<PaymentWithdrawal>> = _paymentWithdrawals.asStateFlow()
+
+    fun loadPayoutWithdrawals() {
+        viewModelScope.launch {
+            try {
+                val dtos = SupabaseClient.apiService.getPayoutWithdrawals(
+                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                    authHeader = getBearerToken()
+                )
+                _paymentWithdrawals.value = dtos.map {
+                    PaymentWithdrawal(it.id, it.name, it.type, it.amount, it.paymentDetails, it.status, System.currentTimeMillis())
+                }
+            } catch (e: Exception) { e.printStackTrace() }
+        }
+    }
 
     private val _announcementsLogs = MutableStateFlow<List<AnnouncementLog>>(listOf(
         AnnouncementLog("MASS_A1", "Global System Core Update", "All field technicians are advised to run NADRA facial match upgrades directly.", "All Techs", System.currentTimeMillis() - 1000 * 60 * 1400),
@@ -1803,10 +2034,20 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun resolveFraudAlert(alertId: Int) {
-        _fraudAlerts.update { alerts ->
-            alerts.map { if (it.id == alertId) it.copy(isResolved = true) else it }
+        viewModelScope.launch {
+            try {
+                SupabaseClient.apiService.updateFraudAlert(
+                    id = "eq.$alertId",
+                    body = mapOf("is_resolved" to true),
+                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                    authHeader = getBearerToken()
+                )
+            } catch (e: Exception) { e.printStackTrace() }
+            _fraudAlerts.update { alerts ->
+                alerts.map { if (it.id == alertId) it.copy(isResolved = true) else it }
+            }
+            addPushNotification("🛡️ Incident #$alertId successfully cataloged and filed to archives.")
         }
-        addPushNotification("🛡️ Incident #$alertId successfully cataloged and filed to archives.")
     }
 
     fun blockTechnicianProfile(phone: String) {
@@ -1818,22 +2059,42 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun releasePayoutWithdrawal(txnId: String) {
-        _paymentWithdrawals.update { txns ->
-            txns.map { if (it.id == txnId) it.copy(status = "Released & Processed") else it }
-        }
-        val txn = _paymentWithdrawals.value.firstOrNull { it.id == txnId }
-        if (txn != null) {
-            val phoneOnly = txn.paymentDetails.substringAfter("- ").trim()
-            addPushNotification("💸 Payout APPROVED: released Rs. ${txn.amount.toInt()} directly to ${txn.paymentDetails}")
-            addWhatsAppUpdate(phoneOnly, "FixNow Payout Alert: Your withdrawal Rs. ${txn.amount.toInt()} has been processed and credited to your account!")
+        viewModelScope.launch {
+            try {
+                SupabaseClient.apiService.updatePayoutWithdrawal(
+                    id = "eq.$txnId",
+                    body = mapOf("status" to "Released & Processed"),
+                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                    authHeader = getBearerToken()
+                )
+            } catch (e: Exception) { e.printStackTrace() }
+            _paymentWithdrawals.update { txns ->
+                txns.map { if (it.id == txnId) it.copy(status = "Released & Processed") else it }
+            }
+            val txn = _paymentWithdrawals.value.firstOrNull { it.id == txnId }
+            if (txn != null) {
+                val phoneOnly = txn.paymentDetails.substringAfter("- ").trim()
+                addPushNotification("💸 Payout APPROVED: released Rs. ${txn.amount.toInt()} directly to ${txn.paymentDetails}")
+                addWhatsAppUpdate(phoneOnly, "FixNow Payout Alert: Your withdrawal Rs. ${txn.amount.toInt()} has been processed and credited to your account!")
+            }
         }
     }
 
     fun rejectPayoutWithdrawal(txnId: String) {
-        _paymentWithdrawals.update { txns ->
-            txns.map { if (it.id == txnId) it.copy(status = "Declined (Fraud / CNIC Audit)") else it }
+        viewModelScope.launch {
+            try {
+                SupabaseClient.apiService.updatePayoutWithdrawal(
+                    id = "eq.$txnId",
+                    body = mapOf("status" to "Declined (Fraud / CNIC Audit)"),
+                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
+                    authHeader = getBearerToken()
+                )
+            } catch (e: Exception) { e.printStackTrace() }
+            _paymentWithdrawals.update { txns ->
+                txns.map { if (it.id == txnId) it.copy(status = "Declined (Fraud / CNIC Audit)") else it }
+            }
+            addPushNotification("🛑 Payout DENIED: Txn #$txnId flagged under compliance review.")
         }
-        addPushNotification("🛑 Payout DENIED: Txn #$txnId flagged under compliance review.")
     }
 
     // Mapbox App API Implementations

@@ -789,3 +789,131 @@ EXCEPTION
     NULL;
 END;
 $$;
+
+
+-- ====================================================================
+-- 10. SUPPORT TICKETS, COUPONS, FRAUD ALERTS, PAYOUT WITHDRAWALS
+-- Run this section after the main schema above.
+-- ====================================================================
+
+-- Drop if re-running
+DROP TABLE IF EXISTS public.support_messages CASCADE;
+DROP TABLE IF EXISTS public.support_tickets CASCADE;
+DROP TABLE IF EXISTS public.coupons CASCADE;
+DROP TABLE IF EXISTS public.fraud_alerts CASCADE;
+DROP TABLE IF EXISTS public.payout_withdrawals CASCADE;
+
+-- support_tickets
+CREATE TABLE public.support_tickets (
+    id          BIGSERIAL PRIMARY KEY,
+    customer_phone TEXT NOT NULL,
+    customer_name  TEXT NOT NULL,
+    booking_id  BIGINT REFERENCES public.bookings(id) ON DELETE SET NULL,
+    category    TEXT NOT NULL,
+    description TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'Open'
+                    CHECK (status IN ('Open','In Progress','Escalated','Resolved')),
+    sla_timer_minutes INT NOT NULL DEFAULT 15,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- support_messages (chat inside a ticket)
+CREATE TABLE public.support_messages (
+    id         BIGSERIAL PRIMARY KEY,
+    ticket_id  BIGINT NOT NULL REFERENCES public.support_tickets(id) ON DELETE CASCADE,
+    sender     TEXT NOT NULL,   -- 'Customer' or 'Support Agent'
+    message    TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- coupons
+CREATE TABLE public.coupons (
+    id              BIGSERIAL PRIMARY KEY,
+    code            TEXT NOT NULL UNIQUE,
+    discount_amount DOUBLE PRECISION NOT NULL CHECK (discount_amount >= 0),
+    description     TEXT NOT NULL,
+    is_referral     BOOLEAN NOT NULL DEFAULT FALSE,
+    referee_name    TEXT,
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- fraud_alerts
+CREATE TABLE public.fraud_alerts (
+    id               BIGSERIAL PRIMARY KEY,
+    title            TEXT NOT NULL,
+    severity         TEXT NOT NULL CHECK (severity IN ('LOW','HIGH','CRITICAL')),
+    description      TEXT NOT NULL,
+    associated_phone TEXT NOT NULL,
+    is_resolved      BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- payout_withdrawals
+CREATE TABLE public.payout_withdrawals (
+    id              TEXT PRIMARY KEY,   -- TXN-XXXXX format
+    name            TEXT NOT NULL,
+    type            TEXT NOT NULL,      -- JazzCash, EasyPaisa, Bank Transfer
+    amount          DOUBLE PRECISION NOT NULL CHECK (amount >= 0),
+    payment_details TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'Pending Approved',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_support_tickets_phone   ON public.support_tickets(customer_phone);
+CREATE INDEX IF NOT EXISTS idx_support_messages_ticket ON public.support_messages(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_fraud_alerts_resolved   ON public.fraud_alerts(is_resolved);
+
+-- updated_at triggers
+CREATE TRIGGER update_support_tickets_modtime   BEFORE UPDATE ON public.support_tickets   FOR EACH ROW EXECUTE FUNCTION public.update_modified_column();
+CREATE TRIGGER update_fraud_alerts_modtime      BEFORE UPDATE ON public.fraud_alerts      FOR EACH ROW EXECUTE FUNCTION public.update_modified_column();
+CREATE TRIGGER update_payout_withdrawals_modtime BEFORE UPDATE ON public.payout_withdrawals FOR EACH ROW EXECUTE FUNCTION public.update_modified_column();
+
+-- RLS
+ALTER TABLE public.support_tickets    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.support_messages   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.coupons            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.fraud_alerts       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.payout_withdrawals ENABLE ROW LEVEL SECURITY;
+
+-- Support tickets: customers see their own; admins see all
+CREATE POLICY "Customer view own tickets"  ON public.support_tickets FOR SELECT TO authenticated USING (
+    customer_phone = (SELECT phone FROM public.customers WHERE id = auth.uid())
+);
+CREATE POLICY "Customer create ticket"     ON public.support_tickets FOR INSERT TO authenticated WITH CHECK (TRUE);
+CREATE POLICY "Admin full support tickets" ON public.support_tickets FOR ALL  TO authenticated USING (public.get_auth_role() = 'admin');
+
+CREATE POLICY "Ticket participants read messages"  ON public.support_messages FOR SELECT TO authenticated USING (TRUE);
+CREATE POLICY "Ticket participants write messages" ON public.support_messages FOR INSERT TO authenticated WITH CHECK (TRUE);
+CREATE POLICY "Admin full support messages"        ON public.support_messages FOR ALL TO authenticated USING (public.get_auth_role() = 'admin');
+
+-- Coupons: all authenticated users can read; only admins can write
+CREATE POLICY "All authenticated read coupons" ON public.coupons FOR SELECT TO authenticated USING (TRUE);
+CREATE POLICY "Admin full coupons"             ON public.coupons FOR ALL    TO authenticated USING (public.get_auth_role() = 'admin');
+
+-- Fraud alerts: admin only
+CREATE POLICY "Admin full fraud alerts"        ON public.fraud_alerts     FOR ALL TO authenticated USING (public.get_auth_role() = 'admin');
+
+-- Payout withdrawals: admin only
+CREATE POLICY "Admin full payout withdrawals"  ON public.payout_withdrawals FOR ALL TO authenticated USING (public.get_auth_role() = 'admin');
+
+-- Realtime for support tickets (so agents see new tickets live)
+DO $$
+BEGIN
+  ALTER TABLE public.support_tickets  REPLICA IDENTITY FULL;
+  ALTER TABLE public.support_messages REPLICA IDENTITY FULL;
+  ALTER PUBLICATION supabase_realtime ADD TABLE public.support_tickets;
+  ALTER PUBLICATION supabase_realtime ADD TABLE public.support_messages;
+EXCEPTION WHEN OTHERS THEN NULL;
+END;
+$$;
+
+-- Seed default coupons
+INSERT INTO public.coupons (code, discount_amount, description, is_referral, is_active) VALUES
+  ('FIXNOW10',   150.0, 'Get flat Rs. 150 off on your first service booking!', FALSE, TRUE),
+  ('PAKISTAN50', 250.0, 'Special National Discount - Flat Rs. 250 off.',        FALSE, TRUE)
+ON CONFLICT (code) DO NOTHING;

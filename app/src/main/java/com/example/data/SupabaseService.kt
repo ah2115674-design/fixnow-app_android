@@ -223,6 +223,66 @@ data class TechnicianInsertDto(
     @Json(name = "referral_code") val referralCode: String = "",
     @Json(name = "referred_by_code") val referredByCode: String? = null
 )
+
+// ============================================================
+// SUPPORT TICKETS, COUPONS, FRAUD ALERTS, PAYOUT WITHDRAWALS
+// ============================================================
+
+@JsonClass(generateAdapter = true)
+data class SupportTicketDto(
+    val id: Long? = null,
+    @Json(name = "customer_phone") val customerPhone: String,
+    @Json(name = "customer_name")  val customerName: String,
+    @Json(name = "booking_id")     val bookingId: Long? = null,
+    val category: String,
+    val description: String,
+    val status: String = "Open",
+    @Json(name = "sla_timer_minutes") val slaTimerMinutes: Int = 15,
+    @Json(name = "created_at") val createdAt: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class SupportMessageDto(
+    val id: Long? = null,
+    @Json(name = "ticket_id") val ticketId: Long,
+    val sender: String,
+    val message: String,
+    @Json(name = "created_at") val createdAt: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class CouponDto(
+    val id: Long? = null,
+    val code: String,
+    @Json(name = "discount_amount") val discountAmount: Double,
+    val description: String,
+    @Json(name = "is_referral")  val isReferral: Boolean = false,
+    @Json(name = "referee_name") val refereeName: String? = null,
+    @Json(name = "is_active")    val isActive: Boolean = true
+)
+
+@JsonClass(generateAdapter = true)
+data class FraudAlertDto(
+    val id: Long? = null,
+    val title: String,
+    val severity: String,
+    val description: String,
+    @Json(name = "associated_phone") val associatedPhone: String,
+    @Json(name = "is_resolved") val isResolved: Boolean = false,
+    @Json(name = "created_at") val createdAt: String? = null
+)
+
+@JsonClass(generateAdapter = true)
+data class PayoutWithdrawalDto(
+    val id: String,
+    val name: String,
+    val type: String,
+    val amount: Double,
+    @Json(name = "payment_details") val paymentDetails: String,
+    val status: String = "Pending Approved",
+    @Json(name = "created_at") val createdAt: String? = null
+)
+
 // ----------------------------------------------------
 // RETROFIT API SERVICE INTERFACE
 // ----------------------------------------------------
@@ -303,6 +363,13 @@ interface SupabaseService {
     @GET("rest/v1/technicians")
     suspend fun getTechnician(
         @Query("phone") phone: String,
+        @Header("apikey") apiKey: String,
+        @Header("Authorization") authHeader: String
+    ): List<TechnicianDto>
+
+    @GET("rest/v1/technicians")
+    suspend fun getTechnicianById(
+        @Query("id") id: String,
         @Header("apikey") apiKey: String,
         @Header("Authorization") authHeader: String
     ): List<TechnicianDto>
@@ -442,4 +509,117 @@ object SupabaseClient {
             false
         }
     }
+    // ---- SUPPORT TICKETS ----
+    @GET("rest/v1/support_tickets")
+    suspend fun getSupportTickets(
+        @Query("customer_phone") phone: String,
+        @Query("order") order: String = "created_at.desc",
+        @Header("apikey") apiKey: String,
+        @Header("Authorization") authHeader: String
+    ): List<SupportTicketDto>
+
+    @GET("rest/v1/support_tickets")
+    suspend fun getAllSupportTickets(
+        @Query("order") order: String = "created_at.desc",
+        @Header("apikey") apiKey: String,
+        @Header("Authorization") authHeader: String
+    ): List<SupportTicketDto>
+
+    @POST("rest/v1/support_tickets")
+    suspend fun createSupportTicket(
+        @Body ticket: SupportTicketDto,
+        @Header("apikey") apiKey: String,
+        @Header("Authorization") authHeader: String,
+        @Header("Prefer") prefer: String = "return=representation"
+    ): Response<List<SupportTicketDto>>
+
+    @PATCH("rest/v1/support_tickets")
+    suspend fun updateSupportTicket(
+        @Query("id") id: String,
+        @Body body: Map<String, @JvmSuppressWildcards Any>,
+        @Header("apikey") apiKey: String,
+        @Header("Authorization") authHeader: String
+    ): Response<Unit>
+
+    // ---- SUPPORT MESSAGES ----
+    @GET("rest/v1/support_messages")
+    suspend fun getSupportMessages(
+        @Query("ticket_id") ticketId: String,
+        @Query("order") order: String = "created_at.asc",
+        @Header("apikey") apiKey: String,
+        @Header("Authorization") authHeader: String
+    ): List<SupportMessageDto>
+
+    @POST("rest/v1/support_messages")
+    suspend fun createSupportMessage(
+        @Body message: SupportMessageDto,
+        @Header("apikey") apiKey: String,
+        @Header("Authorization") authHeader: String,
+        @Header("Prefer") prefer: String = "return=representation"
+    ): Response<List<SupportMessageDto>>
+
+    // ---- COUPONS ----
+    @GET("rest/v1/coupons")
+    suspend fun getCoupons(
+        @Query("is_active") isActive: String = "eq.true",
+        @Header("apikey") apiKey: String,
+        @Header("Authorization") authHeader: String
+    ): List<CouponDto>
+
+    @POST("rest/v1/coupons")
+    suspend fun createCoupon(
+        @Body coupon: CouponDto,
+        @Header("apikey") apiKey: String,
+        @Header("Authorization") authHeader: String,
+        @Header("Prefer") prefer: String = "return=representation"
+    ): Response<List<CouponDto>>
+
+    // ---- FRAUD ALERTS ----
+    @GET("rest/v1/fraud_alerts")
+    suspend fun getFraudAlerts(
+        @Query("order") order: String = "created_at.desc",
+        @Header("apikey") apiKey: String,
+        @Header("Authorization") authHeader: String
+    ): List<FraudAlertDto>
+
+    @POST("rest/v1/fraud_alerts")
+    suspend fun createFraudAlert(
+        @Body alert: FraudAlertDto,
+        @Header("apikey") apiKey: String,
+        @Header("Authorization") authHeader: String,
+        @Header("Prefer") prefer: String = "return=representation"
+    ): Response<List<FraudAlertDto>>
+
+    @PATCH("rest/v1/fraud_alerts")
+    suspend fun updateFraudAlert(
+        @Query("id") id: String,
+        @Body body: Map<String, @JvmSuppressWildcards Any>,
+        @Header("apikey") apiKey: String,
+        @Header("Authorization") authHeader: String
+    ): Response<Unit>
+
+    // ---- PAYOUT WITHDRAWALS ----
+    @GET("rest/v1/payout_withdrawals")
+    suspend fun getPayoutWithdrawals(
+        @Query("order") order: String = "created_at.desc",
+        @Header("apikey") apiKey: String,
+        @Header("Authorization") authHeader: String
+    ): List<PayoutWithdrawalDto>
+
+    @POST("rest/v1/payout_withdrawals")
+    suspend fun createPayoutWithdrawal(
+        @Body withdrawal: PayoutWithdrawalDto,
+        @Header("apikey") apiKey: String,
+        @Header("Authorization") authHeader: String,
+        @Header("Prefer") prefer: String = "return=representation"
+    ): Response<List<PayoutWithdrawalDto>>
+
+    @PATCH("rest/v1/payout_withdrawals")
+    suspend fun updatePayoutWithdrawal(
+        @Query("id") id: String,
+        @Body body: Map<String, @JvmSuppressWildcards Any>,
+        @Header("apikey") apiKey: String,
+        @Header("Authorization") authHeader: String
+    ): Response<Unit>
+
 }
