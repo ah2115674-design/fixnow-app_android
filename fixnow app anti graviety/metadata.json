@@ -1,0 +1,6 @@
+{
+  "name": "FixNow",
+  "description": "On-Demand Home Services Marketplace in Pakistan connecting customers with verified local technicians.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
