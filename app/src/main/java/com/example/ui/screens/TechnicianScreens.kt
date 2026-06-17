@@ -36,13 +36,6 @@ import androidx.compose.ui.window.DialogProperties
 import com.example.data.Booking
 import com.example.data.TechnicianProfile
 import com.example.ui.theme.*
-import android.Manifest
-import android.content.Intent
-import android.net.Uri
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
-import androidx.compose.ui.platform.LocalContext
 import com.example.ui.viewmodel.FixNowViewModel
 import kotlinx.coroutines.delay
 import androidx.compose.foundation.rememberScrollState
@@ -311,36 +304,6 @@ fun TechnicianRegistrationView(
 
         var selfieTaken by remember { mutableStateOf(false) }
         var cnicUploaded by remember { mutableStateOf(false) }
-        val context = LocalContext.current
-
-        // Real camera launcher for selfie
-        val selfieImageUri = remember { mutableStateOf<android.net.Uri?>(null) }
-        val selfiePermLauncher = rememberLauncherForActivityResult(
-            ActivityResultContracts.RequestPermission()
-        ) { granted ->
-            if (granted) viewModel.addPushNotification("📸 Camera ready. Tap again to capture selfie.")
-        }
-        val selfieCaptureLauncher = rememberLauncherForActivityResult(
-            ActivityResultContracts.TakePicturePreview()
-        ) { bitmap ->
-            if (bitmap != null) {
-                selfieTaken = true
-                // Store URI string in viewModel so registerNewTechnician() can read it
-                val fileName = "selfie_${System.currentTimeMillis()}.jpg"
-                viewModel.regSelfieUrl.value = fileName
-                viewModel.addPushNotification("✅ Selfie captured: $fileName")
-            }
-        }
-
-        // Real camera launcher for CNIC scan
-        val cnicCaptureLauncher = rememberLauncherForActivityResult(
-            ActivityResultContracts.TakePicturePreview()
-        ) { bitmap ->
-            if (bitmap != null) {
-                cnicUploaded = true
-                viewModel.addPushNotification("✅ CNIC document scanned successfully.")
-            }
-        }
 
         val cities = listOf("Lahore", "Karachi", "Islamabad")
         val categories = listOf("Electrical Services", "AC Services", "Plumbing Services", "Appliance Repair", "Generator & UPS Services", "Handyman Services", "Cleaning & Maintenance")
@@ -612,16 +575,7 @@ fun TechnicianRegistrationView(
                                 shape = RoundedCornerShape(12.dp)
                             )
                             .background(if (selfieTaken) BrandEmerald.copy(0.04f) else Color.Transparent)
-                            .clickable {
-                                val hasPerm = ContextCompat.checkSelfPermission(
-                                    context, Manifest.permission.CAMERA
-                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                                if (hasPerm) {
-                                    selfieCaptureLauncher.launch(null)
-                                } else {
-                                    selfiePermLauncher.launch(Manifest.permission.CAMERA)
-                                }
-                            }
+                            .clickable { selfieTaken = !selfieTaken }
                             .testTag("snap_selfie_btn"),
                         contentAlignment = Alignment.Center
                     ) {
@@ -661,16 +615,7 @@ fun TechnicianRegistrationView(
                                 shape = RoundedCornerShape(12.dp)
                             )
                             .background(if (cnicUploaded) BrandEmerald.copy(0.04f) else Color.Transparent)
-                            .clickable {
-                                val hasPerm = ContextCompat.checkSelfPermission(
-                                    context, Manifest.permission.CAMERA
-                                ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                                if (hasPerm) {
-                                    cnicCaptureLauncher.launch(null)
-                                } else {
-                                    selfiePermLauncher.launch(Manifest.permission.CAMERA)
-                                }
-                            }
+                            .clickable { cnicUploaded = !cnicUploaded }
                             .testTag("snap_cnic_btn"),
                         contentAlignment = Alignment.Center
                     ) {

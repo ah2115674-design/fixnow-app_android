@@ -1,14 +1,12 @@
 package com.example.ui.screens
 
-import android.content.Intent
-import android.net.Uri
-
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.location.Location
 import android.location.LocationManager
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
@@ -991,34 +989,13 @@ fun CustomerDashboard(
         label = "shimmerAlpha"
     )
 
-    val allTechnicians by viewModel.technicians.collectAsState()
-    val simulatedTechs = remember(allTechnicians, customer) {
-        allTechnicians
-            .filter { it.isOnline && it.isApproved && it.city.equals(customer.city, ignoreCase = true) }
-            .take(4)
-            .map { tech ->
-                NearbyTech(
-                    name = "Captain ${tech.name}",
-                    category = tech.subCategory.ifEmpty { tech.category },
-                    distance = String.format("%.1f km", (Math.random() * 2.5 + 0.5)),
-                    rating = String.format("%.1f", tech.rating),
-                    eta = "${(Math.random() * 12 + 4).toInt()} min",
-                    isOnline = tech.isOnline
-                )
-            }
-            .ifEmpty {
-                // Show online techs from any city if none in customer city
-                allTechnicians.filter { it.isOnline && it.isApproved }.take(3).map { tech ->
-                    NearbyTech(
-                        name = "Captain ${tech.name}",
-                        category = tech.subCategory.ifEmpty { tech.category },
-                        distance = String.format("%.1f km", (Math.random() * 4.0 + 1.0)),
-                        rating = String.format("%.1f", tech.rating),
-                        eta = "${(Math.random() * 18 + 8).toInt()} min",
-                        isOnline = tech.isOnline
-                    )
-                }
-            }
+    val simulatedTechs = remember {
+        listOf(
+            NearbyTech("Captain Muhammad Shafi", "AC Expert", "0.8 km", "4.9", "6 min", true),
+            NearbyTech("Captain Shoukat Ali", "Electrician", "1.4 km", "4.8", "9 min", true),
+            NearbyTech("Captain Sajjad Ahmad", "Plumber", "2.1 km", "4.7", "12 min", true),
+            NearbyTech("Captain Rizwan Malik", "Cleaning Expert", "2.8 km", "4.8", "15 min", false)
+        )
     }
 
     val simulatedOffers = remember {
@@ -3982,7 +3959,7 @@ fun ActiveBookingTrackerScreen(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Icon(Icons.Default.Phone, "Call Partner")
-                                    Text("Call Technician", fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                    Text("Free Voip Call", fontWeight = FontWeight.Bold, fontSize = 12.sp)
                                 }
                             }
 
@@ -3999,7 +3976,7 @@ fun ActiveBookingTrackerScreen(
                                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Text("💬 WhatsApp", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color.White)
+                                    Text("💬 WhatsApp Sim", fontWeight = FontWeight.Bold, fontSize = 12.sp, color = Color.White)
                                 }
                             }
                         }
@@ -4371,36 +4348,21 @@ fun ActiveBookingTrackerScreen(
             }
         }
 
-        // Launch real phone dialer when Call button is tapped
-        val phoneDialContext = androidx.compose.ui.platform.LocalContext.current
+        // Live Voice VOIP call simulate dialog overlay display
         if (showVoipCall) {
-            val techPhone = booking.technicianPhone ?: ""
-            if (techPhone.isNotEmpty()) {
-                val dialIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$techPhone"))
-                phoneDialContext.startActivity(dialIntent)
-            }
-            showVoipCall = false
+            LiveVoipCallOverlay(
+                techName = booking.technicianName ?: "Muhammad Rizwan",
+                onDismiss = { showVoipCall = false }
+            )
         }
 
-        // Open real WhatsApp chat with the assigned technician
+        // WhatsApp simulated in-app chat overlay display
         if (showWhatsAppSim) {
-            val waPhone = booking.technicianPhone?.filter { it.isDigit() } ?: ""
-            val waContext = androidx.compose.ui.platform.LocalContext.current
-            if (waPhone.isNotEmpty()) {
-                // Convert local 03xx number to international +923xx format for wa.me
-                val intlPhone = if (waPhone.startsWith("0")) "92" + waPhone.drop(1) else waPhone
-                val waMsg = "Assalamu Alaikum ${booking.technicianName ?: "Captain"}, I'm waiting for my FixNow booking #${booking.id}."
-                val waIntent = Intent(Intent.ACTION_VIEW,
-                    Uri.parse("https://wa.me/$intlPhone?text=${Uri.encode(waMsg)}"))
-                try {
-                    waContext.startActivity(waIntent)
-                } catch (e: Exception) {
-                    // WhatsApp not installed, open in browser
-                    val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/$intlPhone"))
-                    waContext.startActivity(browserIntent)
-                }
-            }
-            showWhatsAppSim = false
+            WhatsAppSimOverlay(
+                techName = booking.technicianName ?: "Captain Muhammad Rizwan",
+                techPhone = booking.technicianPhone ?: "03001234567",
+                onDismiss = { showWhatsAppSim = false }
+            )
         }
 
         // Digital secure payment modal checkout overlay gateway

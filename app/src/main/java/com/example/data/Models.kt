@@ -65,8 +65,13 @@ data class Booking(
     val reviewComment: String? = null,
     val latitude: Double = 31.5204, // Customer lat
     val longitude: Double = 74.3587, // Customer long
-    val techLatitude: Double = 31.5204, // Live moving coordinates of technician
-    val techLongitude: Double = 74.3587,
+    // FIX: default changed from Lahore coordinates (31.5204/74.3587) to 0.0.
+    // The old default meant any Booking created without explicit tech
+    // coordinates showed a technician already standing at a Lahore landmark
+    // (or worse, at the customer's own address, per the submitBooking bug)
+    // before any technician had been matched or accepted the job.
+    val techLatitude: Double = 0.0, // Live moving coordinates of technician — 0.0 until matched
+    val techLongitude: Double = 0.0,
     val declinedTechnicians: String = "", // Comma-separated list of technician phones who declined
     val isManualAssign: Boolean = false,
     val timestamp: Long = System.currentTimeMillis()

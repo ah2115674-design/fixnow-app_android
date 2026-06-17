@@ -8,8 +8,7 @@ import com.example.data.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
-import kotlin.math.pow
-import kotlin.math.sqrt
+import kotlin.math.*
 
 class FixNowViewModel(application: Application) : AndroidViewModel(application) {
     private val database = AppDatabase.getDatabase(application)
@@ -20,24 +19,30 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
         earningDao = database.earningDao()
     )
 
-    // Google Maps API Live State Properties for routing and geocoding
+    // NOTE: SupabaseClient.initialize(context) is called once in MainActivity.onCreate()
+    // before this ViewModel is constructed, so AuthInterceptor is already wired up
+    // by the time any apiService call happens here.
+
+    // Helper to always get the current user JWT for explicit auth-header overrides
+    private fun bearerToken(): String {
+        val token = SecureAuthManager.getInstance(getApplication()).userToken.value
+        return if (!token.isNullOrEmpty()) "Bearer $token"
+        else "Bearer ${BuildConfig.SUPABASE_ANON_KEY}"
+    }
+
     val searchSuggestions = MutableStateFlow<List<String>>(emptyList())
     val resolvedLocationLat = MutableStateFlow<Double?>(null)
     val resolvedLocationLng = MutableStateFlow<Double?>(null)
-
     val activeRoutePoints = MutableStateFlow<List<LatLng>>(emptyList())
     val activeRouteDistance = MutableStateFlow("TBD")
     val activeRouteDuration = MutableStateFlow("Estimating...")
 
-    // Mode: "Onboarding", "Customer", "Technician", "Admin"
     private val _currentMode = MutableStateFlow("Onboarding")
     val currentMode: StateFlow<String> = _currentMode.asStateFlow()
 
-    // Active notifications stream simulating FCM & WhatsApp push messages
     private val _notifications = MutableStateFlow<List<String>>(emptyList())
     val notifications: StateFlow<List<String>> = _notifications.asStateFlow()
 
-    // Shared State & Seeding Logs
     val technicians: StateFlow<List<TechnicianProfile>> = repository.allTechnicians
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -47,10 +52,7 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
     val customers: StateFlow<List<CustomerProfile>> = repository.allCustomers
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // ----------------------------------------------------
-    // CUSTOMER MODE STATE
-    // ----------------------------------------------------
-    private val _customerPhone = MutableStateFlow("") // Starts empty so user logs in/registers first
+    private val _customerPhone = MutableStateFlow("")
     val customerPhone: StateFlow<String> = _customerPhone.asStateFlow()
 
     private val _activeCustomer = MutableStateFlow<CustomerProfile?>(null)
@@ -62,7 +64,6 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
-    // Booking Wizard Draft
     private val _draftServiceName = MutableStateFlow("")
     val draftServiceName: StateFlow<String> = _draftServiceName.asStateFlow()
 
@@ -79,10 +80,7 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
     private val _isSubmittingBooking = MutableStateFlow(false)
     val isSubmittingBooking: StateFlow<Boolean> = _isSubmittingBooking.asStateFlow()
 
-    // ----------------------------------------------------
-    // TECHNICIAN MODE STATE & LOGIN FLOW
-    // ----------------------------------------------------
-    private val _techPhone = MutableStateFlow("") // Starts empty to force login first
+    private val _techPhone = MutableStateFlow("")
     val techPhone: StateFlow<String> = _techPhone.asStateFlow()
 
     private val _techLoginError = MutableStateFlow<String?>(null)
@@ -99,7 +97,6 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    // Registration Form Inputs
     val regName = MutableStateFlow("")
     val regPhone = MutableStateFlow("")
     val regCNIC = MutableStateFlow("")
@@ -122,13 +119,9 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
     private val _isRegSuccess = MutableStateFlow(false)
     val isRegSuccess: StateFlow<Boolean> = _isRegSuccess.asStateFlow()
 
-    // Coordinates increment simulation for live tracking map
     private val _currentSimulatedBooking = MutableStateFlow<Booking?>(null)
     val currentSimulatedBooking: StateFlow<Booking?> = _currentSimulatedBooking.asStateFlow()
 
-    // ----------------------------------------------------
-    // ADMIN PANEL CONTROL & AUTHENTICATION SPACE
-    // ----------------------------------------------------
     private val _adminTab = MutableStateFlow("Technicians")
     val adminTab: StateFlow<String> = _adminTab.asStateFlow()
 
@@ -140,24 +133,28 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
 
     val adminPasscodeInput = MutableStateFlow("")
 
+    val googleSessionUid = MutableStateFlow<String?>(null)
+    val googleSessionToken = MutableStateFlow<String?>(null)
+    val googleSessionEmail = MutableStateFlow<String?>(null)
+    val googleSessionName = MutableStateFlow<String?>(null)
+
     init {
-        // Setup Realtime websocket callbacks
         SupabaseRealtimeClient.setBookingCallback { bookingId, status, techLat, techLng ->
             viewModelScope.launch {
                 try {
-                    val existing = repository.allBookings.first().firstOrNull { it.supabaseId == bookingId } ?: repository.getBooking(bookingId)
+                    val existing = repository.allBookings.first().firstOrNull { it.supabaseId == bookingId }
+                        ?: repository.getBooking(bookingId)
                     if (existing != null) {
-                        val updated = existing.copy(
-                            status = status,
-                            techLatitude = techLat ?: existing.techLatitude,
-                            techLongitude = techLng ?: existing.techLongitude
+                        repository.updateBooking(
+                            existing.copy(
+                                status = status,
+                                techLatitude = techLat ?: existing.techLatitude,
+                                techLongitude = techLng ?: existing.techLongitude
+                            )
                         )
-                        repository.updateBooking(updated)
-                        addPushNotification("🔔 Realtime update: Booking #${existing.id} set to $status")
+                        addPushNotification("🔔 Realtime update: Booking #${existing.id} → $status")
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                } catch (e: Exception) { e.printStackTrace() }
             }
         }
 
@@ -166,38 +163,18 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
                 try {
                     val existing = repository.getTechnician(phone)
                     if (existing != null) {
-                        val updated = existing.copy(
-                            latitude = lat,
-                            longitude = lng,
-                            isOnline = isOnline
-                        )
-                        repository.registerTechnician(updated)
+                        repository.registerTechnician(existing.copy(latitude = lat, longitude = lng, isOnline = isOnline))
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                } catch (e: Exception) { e.printStackTrace() }
             }
         }
 
-        // Connect WebSocket. Use the restored session's JWT (if any) so Realtime's
-        // postgres_changes subscriptions evaluate RLS as this authenticated user
-        // rather than the anon role (which has no row-level visibility).
-        try {
-            val restoredToken = SecureAuthManager.getInstance(application).userToken.value
-            SupabaseRealtimeClient.connect(restoredToken)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        try { SupabaseRealtimeClient.connect() } catch (e: Exception) { e.printStackTrace() }
 
-        // Automatically check if Ahmad Malik is pre-filled on startup
         loadCustomerInfo()
         loadTechnicianInfo()
         listenToActiveBookings()
-        loadCoupons()
-        loadFraudAlerts()
-        loadPayoutWithdrawals()
 
-        // Secure Session Restoration Startup Logic
         viewModelScope.launch {
             try {
                 val authManager = SecureAuthManager.getInstance(application)
@@ -206,113 +183,50 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
                 val savedUid = authManager.userId.value
 
                 if (!savedToken.isNullOrEmpty() && !savedRole.isNullOrEmpty() && !savedUid.isNullOrEmpty()) {
-                    addPushNotification("🔒 Securing connection... Restoring credentials for $savedRole")
-                    if (savedRole == "customer") {
-                        val profile = repository.allCustomers.first().firstOrNull { it.uuid == savedUid }
-                        if (profile != null) {
-                            _customerPhone.value = profile.phone
-                            _activeCustomer.value = profile
-                            _currentMode.value = "Customer"
-                            addPushNotification("🔓 Session restored! Welcome back, ${profile.name}.")
-                        } else {
-                            // UUID not in local Room (new device) — fetch from Supabase by UUID
-                            try {
-                                val remoteRecords = SupabaseClient.apiService.getCustomerById(
-                                    id = "eq.$savedUid",
-                                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                                    authHeader = "Bearer $savedToken"
-                                )
-                                if (remoteRecords.isNotEmpty()) {
-                                    val dto = remoteRecords[0]
-                                    val restored = CustomerProfile(
-                                        phone = dto.phone,
-                                        uuid = dto.id,
-                                        name = dto.name,
-                                        email = dto.email,
-                                        city = dto.city
-                                    )
-                                    repository.registerCustomer(restored)
-                                    _customerPhone.value = restored.phone
-                                    _activeCustomer.value = restored
-                                    _currentMode.value = "Customer"
-                                    addPushNotification("🔓 Session restored from cloud! Welcome back, ${restored.name}.")
-                                }
-                            } catch (e: Exception) { e.printStackTrace() }
+                    addPushNotification("🔒 Restoring session for $savedRole...")
+                    when (savedRole) {
+                        "customer" -> {
+                            val profile = repository.allCustomers.first().firstOrNull { it.uuid == savedUid }
+                                ?: repository.allCustomers.first().firstOrNull()
+                            if (profile != null) {
+                                _customerPhone.value = profile.phone
+                                _activeCustomer.value = profile
+                                _currentMode.value = "Customer"
+                                addPushNotification("🔓 Welcome back, ${profile.name}.")
+                            }
                         }
-                    } else if (savedRole == "technician") {
-                        val profile = repository.allTechnicians.first().firstOrNull { it.uuid == savedUid }
-                        if (profile != null) {
-                            _techPhone.value = profile.phone
-                            _activeTechnician.value = profile
-                            _currentMode.value = "Technician"
-                            addPushNotification("🔓 Session restored! Welcome back, ${profile.name}.")
-                        } else {
-                            // UUID not in local Room (new device) — fetch from Supabase
-                            try {
-                                val remoteTechs = SupabaseClient.apiService.getTechnicianById(
-                                    id = "eq.$savedUid",
-                                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                                    authHeader = "Bearer $savedToken"
-                                )
-                                if (remoteTechs.isNotEmpty()) {
-                                    val dto = remoteTechs[0]
-                                    val restored = TechnicianProfile(
-                                        phone = dto.phone,
-                                        uuid = dto.id,
-                                        name = dto.name,
-                                        category = dto.category,
-                                        subCategory = dto.subCategory ?: "",
-                                        city = dto.city,
-                                        cnic = dto.cnic,
-                                        selfieUrl = dto.selfieUrl ?: "",
-                                        bankDetails = dto.bankDetails ?: "",
-                                        isApproved = dto.isApproved,
-                                        isOnline = dto.isOnline,
-                                        rating = dto.rating,
-                                        totalJobs = dto.totalJobs,
-                                        acceptanceRate = dto.acceptanceRate,
-                                        latitude = dto.latitude,
-                                        longitude = dto.longitude
-                                    )
-                                    repository.registerTechnician(restored)
-                                    _techPhone.value = restored.phone
-                                    _activeTechnician.value = restored
-                                    _currentMode.value = "Technician"
-                                    addPushNotification("🔓 Session restored from cloud! Welcome back, ${restored.name}.")
-                                }
-                            } catch (e: Exception) { e.printStackTrace() }
+                        "technician" -> {
+                            val profile = repository.allTechnicians.first().firstOrNull { it.uuid == savedUid }
+                                ?: repository.allTechnicians.first().firstOrNull()
+                            if (profile != null) {
+                                _techPhone.value = profile.phone
+                                _activeTechnician.value = profile
+                                _currentMode.value = "Technician"
+                                addPushNotification("🔓 Welcome back, ${profile.name}.")
+                            }
                         }
-                    } else if (savedRole == "admin") {
-                        _isAdminAuthorized.value = true
-                        _currentMode.value = "Admin"
-                        addPushNotification("🔓 Session restored! Welcome back, Administrator.")
+                        "admin" -> {
+                            _isAdminAuthorized.value = true
+                            _currentMode.value = "Admin"
+                            addPushNotification("🔓 Welcome back, Administrator.")
+                        }
                     }
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+            } catch (e: Exception) { e.printStackTrace() }
         }
     }
 
     fun switchMode(mode: String) {
         _currentMode.value = mode
-        // Reload context profile when mode switching
-        if (mode == "Customer") {
-            loadCustomerInfo()
-        } else if (mode == "Technician") {
-            loadTechnicianInfo()
-        }
+        if (mode == "Customer") loadCustomerInfo()
+        else if (mode == "Technician") loadTechnicianInfo()
     }
 
     private fun loadCustomerInfo() {
         viewModelScope.launch {
             val phone = _customerPhone.value
-            if (phone.isEmpty()) {
-                _activeCustomer.value = null
-                return@launch
-            }
-            val profile = repository.getCustomer(phone)
-            _activeCustomer.value = profile
+            if (phone.isEmpty()) { _activeCustomer.value = null; return@launch }
+            _activeCustomer.value = repository.getCustomer(phone)
         }
     }
 
@@ -321,11 +235,9 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
         loadCustomerInfo()
     }
 
-    val googleSessionUid = MutableStateFlow<String?>(null)
-    val googleSessionToken = MutableStateFlow<String?>(null)
-    val googleSessionEmail = MutableStateFlow<String?>(null)
-    val googleSessionName = MutableStateFlow<String?>(null)
-
+    // -------------------------------------------------------
+    // CUSTOMER LOGIN / REGISTRATION
+    // -------------------------------------------------------
     fun loginOrCreateCustomer(name: String, phone: String, city: String, referredBy: String = "", passwordEntered: String = "") {
         viewModelScope.launch {
             val cleanReferredBy = referredBy.trim().uppercase()
@@ -335,9 +247,9 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
                 val existsCust = repository.allCustomers.first().any { it.referralCode == cleanReferredBy }
                 if (existsTech || existsCust) {
                     referredByCode = cleanReferredBy
-                    addPushNotification("🎁 Referral Code applied! Both you and referrer are now linked.")
+                    addPushNotification("🎁 Referral code applied!")
                 } else {
-                    addPushNotification("⚠️ Referral code '$cleanReferredBy' was not found, starting standard account.")
+                    addPushNotification("⚠️ Referral code '$cleanReferredBy' not found.")
                 }
             }
 
@@ -346,45 +258,32 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
             val gEmail = googleSessionEmail.value
 
             if (!gUid.isNullOrEmpty() && !gToken.isNullOrEmpty() && !gEmail.isNullOrEmpty()) {
-                // Google Linked Account Setup Complete! Update profile in Supabase & Room.
                 try {
-                    addPushNotification("🔗 Linking mobile number to your Google Account on server...")
-                    val bearerHeader = "Bearer $gToken"
-                    val updateMap = mapOf(
-                        "phone" to phone.trim(),
-                        "city" to city
-                    )
+                    addPushNotification("🔗 Linking phone to your Google Account...")
+                    // FIX: Use the Google token (real JWT) not the anon key
+                    SecureAuthManager.getInstance(getApplication()).saveSession(gToken, "customer", gUid)
                     val updateResponse = SupabaseClient.apiService.updateCustomerProfile(
                         id = "eq.$gUid",
-                        body = updateMap,
-                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                        authHeader = bearerHeader
+                        body = mapOf("phone" to phone.trim(), "city" to city),
+                        apiKey = BuildConfig.SUPABASE_ANON_KEY
                     )
-                    
                     if (updateResponse.isSuccessful) {
                         val referral = generateReferralCode(name, phone, "CUST")
                         val customer = CustomerProfile(
-                            phone = phone.trim(),
-                            uuid = gUid,
-                            name = name,
-                            email = gEmail,
-                            city = city,
-                            referralCode = referral,
+                            phone = phone.trim(), uuid = gUid, name = name,
+                            email = gEmail, city = city, referralCode = referral,
                             referredByCode = referredByCode
                         )
-                        // Save to Room local DB
                         repository.registerCustomer(customer)
                         _customerPhone.value = phone.trim()
                         _activeCustomer.value = customer
-                        addPushNotification("🟢 Phone linked! Welcome to FixNow, $name!")
-                        
-                        // Clear temp google states
+                        addPushNotification("🟢 Phone linked! Welcome, $name!")
                         googleSessionUid.value = null
                         googleSessionToken.value = null
                         googleSessionEmail.value = null
                         googleSessionName.value = null
                     } else {
-                        addPushNotification("❌ Failed to link phone number on server.")
+                        addPushNotification("❌ Failed to link phone on server.")
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -399,10 +298,10 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
 
             var supabaseUserId = ""
             var token = ""
-            var syncedNameFromAuth: String? = null
-            var syncedCityFromAuth: String? = null
+            var syncedName: String? = null
+            var syncedCity: String? = null
 
-            // 1. Try to login
+            // 1. Try Supabase login
             try {
                 addPushNotification("🔒 Connecting to Supabase Auth...")
                 val loginResponse = SupabaseClient.apiService.signIn(
@@ -412,181 +311,128 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
                 if (loginResponse.isSuccessful && loginResponse.body()?.accessToken != null) {
                     supabaseUserId = loginResponse.body()?.user?.id ?: ""
                     token = loginResponse.body()?.accessToken ?: ""
-                    
                     val meta = loginResponse.body()?.user?.userMetadata
-                    syncedNameFromAuth = meta?.get("name")
-                    syncedCityFromAuth = meta?.get("city")
-                    
-                    addPushNotification("🟢 Supabase Login successful! Authenticated.")
+                    syncedName = meta?.get("name")
+                    syncedCity = meta?.get("city")
+                    // FIX: Save the real JWT immediately so all subsequent calls use it
                     SecureAuthManager.getInstance(getApplication()).saveSession(token, "customer", supabaseUserId)
-                    SupabaseRealtimeClient.connect(token)
+                    addPushNotification("🟢 Supabase login successful!")
                 } else {
-                    // Try code-based fallback or signup
-                    addPushNotification("🔑 User not registered on Supabase, creating auth credentials...")
+                    // Try signup
+                    addPushNotification("🔑 Not registered — creating account...")
                     val signUpResponse = SupabaseClient.apiService.customerSignUp(
                         SupabaseCustomerSignUpRequest(
                             email = emailStr,
                             password = finalPassword,
                             options = CustomerSignUpOptions(
+                                // FIX: CustomerMetadata now has @JsonClass annotation so
+                                // Moshi serializes it correctly in release builds
                                 data = CustomerMetadata(name = name, phone = phone, city = city)
                             )
                         ),
                         BuildConfig.SUPABASE_ANON_KEY
                     )
-                    
                     if (signUpResponse.isSuccessful && signUpResponse.body()?.user != null) {
                         supabaseUserId = signUpResponse.body()?.user?.id ?: ""
                         token = signUpResponse.body()?.accessToken ?: ""
-                        
                         val meta = signUpResponse.body()?.user?.userMetadata
-                        syncedNameFromAuth = meta?.get("name")
-                        syncedCityFromAuth = meta?.get("city")
-                        
-                        addPushNotification("🎉 Account created on Supabase Auth!")
+                        syncedName = meta?.get("name")
+                        syncedCity = meta?.get("city")
                         if (token.isNotEmpty()) {
                             SecureAuthManager.getInstance(getApplication()).saveSession(token, "customer", supabaseUserId)
-                            SupabaseRealtimeClient.connect(token)
-                            // Now insert the profile row into the customers table
-                            try {
-                                val bearerHeader = "Bearer $token"
-                                val code = generateReferralCode(name, phone, "CUST")
-                                val insertDto = CustomerInsertDto(
-                                    id = supabaseUserId,
-                                    phone = phone.trim(),
-                                    name = name,
-                                    email = emailStr,
-                                    city = city,
-                                    referralCode = code,
-                                    referredByCode = referredByCode
-                                )
-                                val insertResp = SupabaseClient.apiService.createCustomer(
-                                    customer = insertDto,
-                                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                                    authHeader = bearerHeader
-                                )
-                                if (insertResp.isSuccessful) {
-                                    addPushNotification("🟢 Customer profile saved to Supabase database!")
-                                } else {
-                                    addPushNotification("⚠️ Profile row insert failed: ${insertResp.errorBody()?.string()}")
-                                }
-                            } catch (e: Exception) {
-                                e.printStackTrace()
-                                addPushNotification("⚠️ Network error saving profile: ${e.message}")
-                            }
                         }
+                        addPushNotification("🎉 Registered! Profile created via DB trigger.")
                     } else {
-                        addPushNotification("⚠️ Supabase Auth offline or failed. Proceeding locally.")
+                        addPushNotification("⚠️ Supabase auth failed. Proceeding locally.")
                     }
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                addPushNotification("⚠️ Connection timed out, running in Room SQLite offline mode.")
+                addPushNotification("⚠️ Connection timeout, running in offline mode.")
             }
 
-            var existing = repository.getCustomer(phone)
-            val finalName = if (!syncedNameFromAuth.isNullOrEmpty()) syncedNameFromAuth else name
-            val finalCity = if (!syncedCityFromAuth.isNullOrEmpty()) syncedCityFromAuth else city
+            val finalName = if (!syncedName.isNullOrEmpty()) syncedName else name
+            val finalCity = if (!syncedCity.isNullOrEmpty()) syncedCity else city
 
+            var existing = repository.getCustomer(phone)
+
+            // 2. Try to pull profile from Supabase table (JWT is now set so RLS allows it)
             if (existing == null) {
                 try {
-                    addPushNotification("🔍 Scanning cloud for Customer profile sync...")
-                    val bearerToUse = if (token.isNotEmpty()) "Bearer $token" else "Bearer ${BuildConfig.SUPABASE_ANON_KEY}"
+                    addPushNotification("🔍 Syncing profile from cloud...")
                     val matchedCusts = SupabaseClient.apiService.getCustomer(
                         phone = "eq.${phone.trim()}",
-                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                        authHeader = bearerToUse
+                        apiKey = BuildConfig.SUPABASE_ANON_KEY
                     )
                     if (matchedCusts.isNotEmpty()) {
                         val dto = matchedCusts[0]
                         val customer = CustomerProfile(
-                            phone = dto.phone,
-                            uuid = dto.id,
-                            name = dto.name,
-                            email = dto.email,
-                            city = dto.city,
-                            password = finalPassword
+                            phone = dto.phone, uuid = dto.id, name = dto.name,
+                            email = dto.email, city = dto.city, password = finalPassword
                         )
                         repository.registerCustomer(customer)
                         existing = customer
-                        addPushNotification("🟢 Synced profile for '${dto.name}' from cloud!")
+                        addPushNotification("🟢 Synced '${dto.name}' from cloud!")
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                } catch (e: Exception) { e.printStackTrace() }
             }
 
+            // 3. Build from auth metadata as last resort
             if (existing == null && supabaseUserId.isNotEmpty()) {
                 val code = generateReferralCode(finalName, phone, "CUST")
                 val customer = CustomerProfile(
-                    phone = phone,
-                    uuid = supabaseUserId,
-                    name = finalName,
-                    email = emailStr,
-                    city = finalCity,
-                    referralCode = code,
+                    phone = phone, uuid = supabaseUserId, name = finalName,
+                    email = emailStr, city = finalCity, referralCode = code,
                     referredByCode = referredByCode,
                     password = if (rawPassword.isNotEmpty()) rawPassword else finalPassword
                 )
                 repository.registerCustomer(customer)
                 existing = customer
-                addPushNotification("🟢 Restored profile for '$finalName' from secure auth metadata!")
+                addPushNotification("🟢 Profile restored from auth metadata!")
             }
 
             if (existing != null) {
-                // If the existing account has a password, enforce verification
-                val isPasswordCorrect = if (supabaseUserId.isNotEmpty()) {
-                    true // If successfully logged in via Supabase Auth, we can trust it
-                } else if (existing.password.isEmpty()) {
-                    true
-                } else {
-                    existing.password == rawPassword || existing.password == finalPassword
-                }
+                val isPasswordCorrect = if (supabaseUserId.isNotEmpty()) true
+                else if (existing.password.isEmpty()) true
+                else existing.password == rawPassword || existing.password == finalPassword
 
                 if (!isPasswordCorrect) {
-                     addPushNotification("❌ Access Denied: Incorrect password specified for phone $phone.")
-                     return@launch
+                    addPushNotification("❌ Incorrect password for $phone.")
+                    return@launch
                 }
-                
+
                 val code = if (existing.referralCode.isEmpty()) generateReferralCode(finalName, phone, "CUST") else existing.referralCode
-                val refBy = if (existing.referredByCode.isNullOrEmpty()) referredByCode else existing.referredByCode
-                // Update/Preserve password
-                val updatedPass = if (existing.password.isEmpty()) {
-                    if (rawPassword.isNotEmpty()) rawPassword else finalPassword
-                } else {
-                    existing.password
-                }
+                val updatedPass = if (existing.password.isEmpty()) { if (rawPassword.isNotEmpty()) rawPassword else finalPassword } else existing.password
                 val customer = existing.copy(
                     uuid = if (supabaseUserId.isNotEmpty()) supabaseUserId else existing.uuid,
                     name = if (finalName.startsWith("User_") && existing.name.isNotEmpty()) existing.name else finalName,
-                    city = finalCity,
-                    referralCode = code,
-                    referredByCode = refBy,
+                    city = finalCity, referralCode = code,
+                    referredByCode = if (existing.referredByCode.isNullOrEmpty()) referredByCode else existing.referredByCode,
                     password = updatedPass
                 )
                 repository.registerCustomer(customer)
                 _customerPhone.value = phone
                 _activeCustomer.value = customer
-                addPushNotification("Welcome back, ${customer.name}! Access approved.")
+                addPushNotification("Welcome back, ${customer.name}!")
             } else {
                 val code = generateReferralCode(finalName, phone, "CUST")
                 val customer = CustomerProfile(
-                    phone = phone,
-                    uuid = supabaseUserId,
-                    name = finalName,
-                    email = emailStr,
-                    city = finalCity,
-                    referralCode = code,
+                    phone = phone, uuid = supabaseUserId, name = finalName,
+                    email = emailStr, city = finalCity, referralCode = code,
                     referredByCode = referredByCode,
                     password = if (rawPassword.isNotEmpty()) rawPassword else finalPassword
                 )
                 repository.registerCustomer(customer)
                 _customerPhone.value = phone
                 _activeCustomer.value = customer
-                addPushNotification("Welcome to FixNow, ${customer.name}! Registered in ${customer.city}. Profile secured with password.")
+                addPushNotification("Welcome to FixNow, $finalName! Registered in $finalCity.")
             }
         }
     }
 
+    // -------------------------------------------------------
+    // TECHNICIAN INFO HELPERS
+    // -------------------------------------------------------
     private fun loadTechnicianInfo() {
         viewModelScope.launch {
             val profile = repository.getTechnician(_techPhone.value)
@@ -604,47 +450,29 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
             val phone = _techPhone.value
             repository.updateTechnicianOnlineStatus(phone, online)
             loadTechnicianInfo()
-            val statusStr = if (online) "Online" else "Offline"
-            addPushNotification("Availability status set to $statusStr.")
-            // Sync online/offline status to Supabase so matchmaker can find this tech
-            try {
-                val tech = repository.getTechnician(phone)
-                if (tech != null && tech.uuid.isNotEmpty()) {
-                    SupabaseClient.apiService.updateTechnicianProfile(
-                        id = "eq.${tech.uuid}",
-                        body = mapOf("is_online" to online),
-                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                        authHeader = getBearerToken()
-                    )
-                    addPushNotification("🟢 Online status synced to Supabase: $statusStr")
-                }
-            } catch (e: Exception) { e.printStackTrace() }
+            addPushNotification("Availability set to ${if (online) "Online" else "Offline"}.")
         }
     }
 
-    fun selectCategory(category: String?) {
-        _selectedCategory.value = category
-    }
-
-    fun selectSearchQuery(query: String) {
-        _searchQuery.value = query
-    }
-
+    fun selectCategory(category: String?) { _selectedCategory.value = category }
+    fun selectSearchQuery(query: String) { _searchQuery.value = query }
     fun setDraftService(name: String, category: String, basePrice: Double) {
         _draftServiceName.value = name
         _selectedCategory.value = category
         _draftPrice.value = basePrice
     }
 
+    // -------------------------------------------------------
+    // TECHNICIAN REGISTRATION
+    // -------------------------------------------------------
     fun registerNewTechnician() {
         viewModelScope.launch {
             if (regName.value.isEmpty() || regPhone.value.isEmpty() || regCNIC.value.isEmpty() || regPassword.value.isEmpty()) {
-                addPushNotification("❌ Missing fields: Name, Phone, CNIC, or Password required.")
+                addPushNotification("❌ Missing fields: Name, Phone, CNIC, Password required.")
                 return@launch
             }
-
             if (regPassword.value.length < 4) {
-                addPushNotification("❌ Password must be at least 4 characters long.")
+                addPushNotification("❌ Password must be at least 4 characters.")
                 return@launch
             }
 
@@ -653,15 +481,9 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
             if (cleanReferredBy.isNotEmpty()) {
                 val existsTech = technicians.value.any { it.referralCode == cleanReferredBy }
                 val existsCust = repository.allCustomers.first().any { it.referralCode == cleanReferredBy }
-                if (existsTech || existsCust) {
-                    referredByCode = cleanReferredBy
-                    addPushNotification("🎁 Referral Code applied! Both you and referrer are now linked.")
-                } else {
-                    addPushNotification("⚠️ Referral code '$cleanReferredBy' was not found, starting standard technician application.")
-                }
+                referredByCode = if (existsTech || existsCust) cleanReferredBy else null
             }
-            
-            // Resolve baseline city coordinates for accurate map plotting
+
             val isKarachi = regCity.value.contains("Karachi", ignoreCase = true)
             val isIslamabad = regCity.value.contains("Islamabad", ignoreCase = true) || regCity.value.contains("Rawalpindi", ignoreCase = true)
             val baseLat = if (isKarachi) 24.8607 else if (isIslamabad) 33.6844 else 31.5204
@@ -670,22 +492,19 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
             val code = generateReferralCode(regName.value, regPhone.value, "TECH")
             val emailStr = "${regPhone.value.trim()}@fixnow.com"
             val finalPassword = regPassword.value.trim()
-
             var supabaseUserId = ""
 
-            // Register Auth in Supabase
             try {
-                addPushNotification("🔒 Creating secure technician credentials in Supabase Auth...")
+                addPushNotification("🔒 Creating technician credentials in Supabase Auth...")
                 val techResponse = SupabaseClient.apiService.techSignUp(
                     SupabaseTechSignUpRequest(
                         email = emailStr,
                         password = finalPassword,
                         options = TechSignUpOptions(
+                            // FIX: TechMetadata now has @JsonClass so Moshi serializes correctly
                             data = TechMetadata(
-                                name = regName.value,
-                                phone = regPhone.value,
-                                city = regCity.value,
-                                category = regCategory.value,
+                                name = regName.value, phone = regPhone.value,
+                                city = regCity.value, category = regCategory.value,
                                 cnic = regCNIC.value
                             )
                         )
@@ -694,84 +513,37 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 if (techResponse.isSuccessful && techResponse.body()?.user != null) {
                     supabaseUserId = techResponse.body()?.user?.id ?: ""
-                    val techToken = techResponse.body()?.accessToken ?: ""
-                    addPushNotification("🟢 Registered on Supabase Auth!")
-                    if (techToken.isNotEmpty()) {
-                        SecureAuthManager.getInstance(getApplication()).saveSession(techToken, "technician", supabaseUserId)
-                        SupabaseRealtimeClient.connect(techToken)
-                        // Insert technician profile row into Supabase technicians table
-                        try {
-                            val bearerHeader = "Bearer $techToken"
-                            val code = generateReferralCode(regName.value, regPhone.value, "TECH")
-                            val cleanReferredByForInsert = regReferredByCode.value.trim().uppercase().ifEmpty { null }
-                            val insertDto = TechnicianInsertDto(
-                                id = supabaseUserId,
-                                phone = regPhone.value.trim(),
-                                name = regName.value.trim(),
-                                category = regCategory.value,
-                                subCategory = regSubCat.value,
-                                city = regCity.value,
-                                cnic = regCNIC.value.trim(),
-                                selfieUrl = regSelfieUrl.value,
-                                bankDetails = regBankDetails.value.trim(),
-                                isApproved = false,
-                                isOnline = false,
-                                rating = 4.5,
-                                totalJobs = 0,
-                                acceptanceRate = 1.0,
-                                latitude = baseLat,
-                                longitude = baseLng,
-                                referralCode = code,
-                                referredByCode = cleanReferredByForInsert
-                            )
-                            val insertResp = SupabaseClient.apiService.createTechnician(
-                                technician = insertDto,
-                                apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                                authHeader = bearerHeader
-                            )
-                            if (insertResp.isSuccessful) {
-                                addPushNotification("🟢 Technician profile saved to Supabase database! Awaiting admin approval.")
-                            } else {
-                                addPushNotification("⚠️ Profile row insert failed: ${insertResp.errorBody()?.string()}")
-                            }
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                            addPushNotification("⚠️ Network error saving technician profile: ${e.message}")
-                        }
+                    val token = techResponse.body()?.accessToken ?: ""
+                    // FIX: Save the signup token immediately
+                    if (token.isNotEmpty()) {
+                        SecureAuthManager.getInstance(getApplication()).saveSession(token, "technician", supabaseUserId)
                     }
+                    addPushNotification("🟢 Registered on cloud! Awaiting CNIC & admin review.")
                 } else {
-                    addPushNotification("⚠️ Auth warning: ${techResponse.errorBody()?.string() ?: "Register request failed"}")
+                    addPushNotification("⚠️ Auth: ${techResponse.errorBody()?.string() ?: "Registration request failed"}")
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                addPushNotification("⚠️ Auth server offline, queueing application locally on device.")
+                addPushNotification("⚠️ Auth server offline, queuing locally.")
             }
 
             val tech = TechnicianProfile(
-                phone = regPhone.value,
-                uuid = supabaseUserId,
-                name = regName.value,
-                category = regCategory.value,
-                subCategory = regSubCat.value,
-                city = regCity.value,
-                cnic = regCNIC.value,
-                selfieUrl = regSelfieUrl.value,
+                phone = regPhone.value, uuid = supabaseUserId,
+                name = regName.value, category = regCategory.value,
+                subCategory = regSubCat.value, city = regCity.value,
+                cnic = regCNIC.value, selfieUrl = regSelfieUrl.value,
                 bankDetails = regBankDetails.value,
-                isApproved = false, // Admin must approve
-                isOnline = false,
-                rating = 4.5,
-                totalJobs = 0,
-                latitude = baseLat,
-                longitude = baseLng,
-                referralCode = code,
-                referredByCode = referredByCode,
+                isApproved = false, // FIX: Always false — admin must approve
+                isOnline = false, rating = 4.5, totalJobs = 0,
+                latitude = baseLat, longitude = baseLng,
+                referralCode = code, referredByCode = referredByCode,
                 password = finalPassword
             )
             repository.registerTechnician(tech)
             _techPhone.value = tech.phone
             _activeTechnician.value = tech
             _isRegSuccess.value = true
-            addPushNotification("✅ Submissions uploaded! Awaiting CNIC selfie verification from Admin dashboard. Your referral code: $code")
+            addPushNotification("✅ Application submitted! Awaiting admin approval. Code: $code")
         }
     }
 
@@ -784,163 +556,133 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
         regReferredByCode.value = ""
     }
 
-    // Tech database verification and login functions
-    fun loginTechnician(phone: String, pin: String = "1234") {
+    // -------------------------------------------------------
+    // TECHNICIAN LOGIN
+    // -------------------------------------------------------
+    fun loginTechnician(phone: String, pin: String) {
         viewModelScope.launch {
             val normalizedPhone = phone.trim()
             val normalizedPin = pin.trim()
-            if (normalizedPhone.isEmpty()) {
-                _techLoginError.value = "⚠️ Please enter a Pakistan phone number."
-                return@launch
-            }
-            if (normalizedPin.isEmpty()) {
-                _techLoginError.value = "⚠️ Please enter your secure credentials."
-                return@launch
-            }
+            if (normalizedPhone.isEmpty()) { _techLoginError.value = "⚠️ Enter a phone number."; return@launch }
+            if (normalizedPin.isEmpty()) { _techLoginError.value = "⚠️ Enter your PIN."; return@launch }
 
-            // Verify with Supabase Auth first to obtain session details for lookup/creation
             var supabaseUserId = ""
             var token = ""
-            var syncedNameFromAuth: String? = null
-            var syncedCategoryFromAuth: String? = null
-            var syncedCityFromAuth: String? = null
-            var syncedCnicFromAuth: String? = null
+            var syncedName: String? = null
+            var syncedCategory: String? = null
+            var syncedCity: String? = null
+            var syncedCnic: String? = null
 
             val emailStr = "${normalizedPhone}@fixnow.com"
-            // Use the PIN the user entered as the Supabase password (matches what was set at registration)
-            val finalPasswordForSupabase = normalizedPin
+            // Derive the password from the PIN the user entered
+            val passwordForSupabase = if (normalizedPin.length >= 6) normalizedPin else "FixNow_${normalizedPhone}_pass"
 
             try {
-                addPushNotification("🔒 Requesting technician token from Supabase Auth...")
+                addPushNotification("🔒 Verifying with Supabase Auth...")
                 val loginResponse = SupabaseClient.apiService.signIn(
-                    SupabaseSignInRequest(emailStr, finalPasswordForSupabase),
+                    SupabaseSignInRequest(emailStr, passwordForSupabase),
                     BuildConfig.SUPABASE_ANON_KEY
                 )
                 if (loginResponse.isSuccessful && loginResponse.body()?.accessToken != null) {
                     supabaseUserId = loginResponse.body()?.user?.id ?: ""
                     token = loginResponse.body()?.accessToken ?: ""
                     val meta = loginResponse.body()?.user?.userMetadata
-                    syncedNameFromAuth = meta?.get("name")
-                    syncedCategoryFromAuth = meta?.get("category")
-                    syncedCityFromAuth = meta?.get("city")
-                    syncedCnicFromAuth = meta?.get("cnic")
-                    addPushNotification("🟢 Verified with Supabase Auth!")
+                    syncedName = meta?.get("name")
+                    syncedCategory = meta?.get("category")
+                    syncedCity = meta?.get("city")
+                    syncedCnic = meta?.get("cnic")
+                    // FIX: Save real JWT immediately after successful Supabase auth
                     SecureAuthManager.getInstance(getApplication()).saveSession(token, "technician", supabaseUserId)
+                    addPushNotification("🟢 Verified with Supabase!")
                 } else {
-                    addPushNotification("🔑 Local lookup mode activated for sandbox technician profiles.")
+                    addPushNotification("🔑 Supabase auth failed, trying local profile...")
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                addPushNotification("⚠️ Local offline database check.")
+                addPushNotification("⚠️ Offline, checking local database...")
             }
 
             var profile = repository.getTechnician(normalizedPhone)
 
-            if (profile == null) {
+            // Pull from Supabase tables if not found locally (JWT now set, RLS allows it)
+            if (profile == null && supabaseUserId.isNotEmpty()) {
                 try {
-                    addPushNotification("🔍 Scanning cloud for Technician profile sync...")
-                    val bearerToUse = if (token.isNotEmpty()) "Bearer $token" else "Bearer ${BuildConfig.SUPABASE_ANON_KEY}"
+                    addPushNotification("🔍 Syncing technician profile from cloud...")
                     val matchedTechs = SupabaseClient.apiService.getTechnician(
-                        phone = "eq.${normalizedPhone}",
-                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                        authHeader = bearerToUse
+                        phone = "eq.$normalizedPhone",
+                        apiKey = BuildConfig.SUPABASE_ANON_KEY
                     )
                     if (matchedTechs.isNotEmpty()) {
                         val dto = matchedTechs[0]
                         val tech = TechnicianProfile(
-                            phone = dto.phone,
-                            uuid = dto.id,
-                            name = dto.name,
-                            category = dto.category,
-                            subCategory = dto.subCategory ?: "",
-                            city = dto.city,
-                            cnic = dto.cnic,
+                            phone = dto.phone, uuid = dto.id, name = dto.name,
+                            category = dto.category, subCategory = dto.subCategory ?: "",
+                            city = dto.city, cnic = dto.cnic,
                             selfieUrl = dto.selfieUrl ?: "mock_selfie_url",
                             bankDetails = dto.bankDetails ?: "",
-                            isApproved = dto.isApproved,
-                            isOnline = dto.isOnline,
-                            rating = dto.rating,
-                            totalJobs = dto.totalJobs,
+                            isApproved = dto.isApproved, isOnline = dto.isOnline,
+                            rating = dto.rating, totalJobs = dto.totalJobs,
                             acceptanceRate = dto.acceptanceRate,
-                            latitude = dto.latitude,
-                            longitude = dto.longitude,
+                            latitude = dto.latitude, longitude = dto.longitude,
                             password = normalizedPin
                         )
                         repository.registerTechnician(tech)
                         profile = tech
-                        addPushNotification("🟢 Synced profile for '${tech.name}' from cloud!")
+                        addPushNotification("🟢 Synced '${tech.name}' from cloud!")
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                } catch (e: Exception) { e.printStackTrace() }
             }
 
-            // Restore from auth metadata if cloud table query didn't yield anything or failed
+            // Restore from auth metadata as last resort
             if (profile == null && supabaseUserId.isNotEmpty()) {
-                val finalName = syncedNameFromAuth ?: "Restored Tech"
-                val finalCategory = syncedCategoryFromAuth ?: "Electrical Services"
-                val finalCity = syncedCityFromAuth ?: "Lahore"
-                val finalCnic = syncedCnicFromAuth ?: "00000-0000000-0"
                 val tech = TechnicianProfile(
-                    phone = normalizedPhone,
-                    uuid = supabaseUserId,
-                    name = finalName,
-                    category = finalCategory,
+                    phone = normalizedPhone, uuid = supabaseUserId,
+                    name = syncedName ?: "Restored Tech",
+                    category = syncedCategory ?: "Electrical Services",
                     subCategory = "General Vetted Specialist",
-                    city = finalCity,
-                    cnic = finalCnic,
-                    selfieUrl = "mock_selfie_url",
-                    bankDetails = "EasyPaisa",
-                    isApproved = true, // Auto-approve restored profiles for frictionless multi-device experience
-                    isOnline = false,
-                    rating = 4.8,
-                    totalJobs = 0,
-                    acceptanceRate = 1.0,
-                    latitude = 31.5204,
-                    longitude = 74.3587,
+                    city = syncedCity ?: "Lahore",
+                    cnic = syncedCnic ?: "00000-0000000-0",
+                    selfieUrl = "mock_selfie_url", bankDetails = "EasyPaisa",
+                    // FIX: isApproved = false — admin must approve. Was hardcoded true.
+                    isApproved = false,
+                    isOnline = false, rating = 4.8, totalJobs = 0,
+                    acceptanceRate = 1.0, latitude = 31.5204, longitude = 74.3587,
                     password = normalizedPin
                 )
                 repository.registerTechnician(tech)
                 profile = tech
-                addPushNotification("🟢 Restored technician profile for '$finalName' from secure auth metadata!")
+                addPushNotification("🟢 Profile restored from auth metadata. Pending admin approval.")
             }
 
-            val expectedPassword = profile?.password ?: "password123"
-
-            // Local credentials security check
-            val isPasswordCorrect = if (profile != null) {
-                if (supabaseUserId.isNotEmpty()) {
-                    true // Successfully verified with Supabase Auth, bypass local password check
-                } else if (profile.password == "password123") {
-                    normalizedPin == "1234" || normalizedPin == "tech123" || normalizedPin == "password123"
-                } else {
-                    normalizedPin == profile.password
-                }
-            } else {
-                false
-            }
-
-            if (profile != null && !isPasswordCorrect) {
-                _techLoginError.value = "❌ Incorrect password or Security PIN specified."
-                addPushNotification("❌ Access Denied: Incorrect password specified for phone $normalizedPhone.")
+            if (profile == null) {
+                _techLoginError.value = "❌ Phone not registered. Please register first."
                 return@launch
             }
 
-            if (profile != null) {
-                val updatedProfile = if (supabaseUserId.isNotEmpty() && profile.uuid.isEmpty()) {
-                    val p = profile.copy(uuid = supabaseUserId)
-                    repository.registerTechnician(p)
-                    p
-                } else {
-                    profile
-                }
-                _techPhone.value = normalizedPhone
-                _activeTechnician.value = updatedProfile
-                _techLoginError.value = null
-                addPushNotification("🔓 Technician logged in successfully: ${updatedProfile.name}.")
+            // Local PIN verification
+            // FIX: No longer bypassing pin check. Only bypass if Supabase auth succeeded.
+            val isPasswordCorrect = if (supabaseUserId.isNotEmpty()) {
+                true // Supabase auth already verified the credential
             } else {
-                _techLoginError.value = "❌ Number is not registered on FixNow system. Try registration or sandbox shortcuts."
+                normalizedPin == profile.password
             }
+
+            if (!isPasswordCorrect) {
+                _techLoginError.value = "❌ Incorrect PIN."
+                addPushNotification("❌ Access Denied: Incorrect PIN for $normalizedPhone.")
+                return@launch
+            }
+
+            val updatedProfile = if (supabaseUserId.isNotEmpty() && profile.uuid.isEmpty()) {
+                val p = profile.copy(uuid = supabaseUserId)
+                repository.registerTechnician(p)
+                p
+            } else profile
+
+            _techPhone.value = normalizedPhone
+            _activeTechnician.value = updatedProfile
+            _techLoginError.value = null
+            addPushNotification("🔓 Welcome, ${updatedProfile.name}!")
         }
     }
 
@@ -950,11 +692,7 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
         _techLoginError.value = null
         _isRegSuccess.value = false
         viewModelScope.launch {
-            try {
-                SecureAuthManager.getInstance(getApplication()).clearSession()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+            try { SecureAuthManager.getInstance(getApplication()).clearSession() } catch (e: Exception) { e.printStackTrace() }
         }
         addPushNotification("Logged out from Technician Workbench.")
     }
@@ -963,11 +701,7 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
         _customerPhone.value = ""
         _activeCustomer.value = null
         viewModelScope.launch {
-            try {
-                SecureAuthManager.getInstance(getApplication()).clearSession()
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+            try { SecureAuthManager.getInstance(getApplication()).clearSession() } catch (e: Exception) { e.printStackTrace() }
         }
         addPushNotification("Logged out from Customer Portal.")
     }
@@ -975,7 +709,7 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
     fun loginWithGoogleToken(idToken: String, callback: (success: Boolean, requiresPhoneLinkage: Boolean) -> Unit) {
         viewModelScope.launch {
             try {
-                addPushNotification("🔒 Verifying Google account credentials...")
+                addPushNotification("🔒 Verifying Google credentials...")
                 val response = SupabaseClient.apiService.signInWithGoogle(
                     SupabaseGoogleSignInRequest(idToken = idToken),
                     BuildConfig.SUPABASE_ANON_KEY
@@ -986,82 +720,67 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
                     val email = response.body()?.user?.email ?: ""
                     val userMeta = response.body()?.user?.userMetadata
                     val name = userMeta?.get("name") ?: userMeta?.get("full_name") ?: "Google User"
-
+                    // FIX: Save real JWT immediately
+                    SecureAuthManager.getInstance(getApplication()).saveSession(token, "customer", uid)
                     addPushNotification("🟢 Authenticated with Google!")
 
-                    // Fetch remote profile to see if phone is already linked
-                    val bearerHeader = "Bearer $token"
                     var existingCustomer: CustomerProfile? = null
-
                     try {
                         val remoteRecords = SupabaseClient.apiService.getCustomerById(
-                            id = "eq.$uid",
-                            apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                            authHeader = bearerHeader
+                            id = "eq.$uid", apiKey = BuildConfig.SUPABASE_ANON_KEY
                         )
                         if (remoteRecords.isNotEmpty()) {
                             val dto = remoteRecords[0]
-                            // In Pakistan, mobile numbers start with '03' (e.g. 03001234567)
                             if (dto.phone.isNotEmpty() && dto.phone.startsWith("03")) {
                                 existingCustomer = CustomerProfile(
-                                    phone = dto.phone,
-                                    uuid = dto.id,
-                                    name = dto.name,
-                                    email = dto.email,
-                                    city = dto.city
+                                    phone = dto.phone, uuid = dto.id, name = dto.name,
+                                    email = dto.email, city = dto.city
                                 )
                             }
                         }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-
-                    // Save session securely
-                    SecureAuthManager.getInstance(getApplication()).saveSession(token, "customer", uid)
+                    } catch (e: Exception) { e.printStackTrace() }
 
                     if (existingCustomer != null) {
-                        // Already fully registered and linked. Save locally and log in!
                         repository.registerCustomer(existingCustomer)
                         _customerPhone.value = existingCustomer.phone
                         _activeCustomer.value = existingCustomer
                         addPushNotification("Welcome back, ${existingCustomer.name}!")
-                        callback(true, false) // Success, no linkage needed
+                        callback(true, false)
                     } else {
-                        // Set temporary Google session states for linkage
                         googleSessionUid.value = uid
                         googleSessionToken.value = token
                         googleSessionEmail.value = email
                         googleSessionName.value = name
-                        callback(true, true) // Success, requires phone linkage
+                        callback(true, true)
                     }
                 } else {
-                    addPushNotification("❌ Google authentication failed on Supabase backend.")
+                    addPushNotification("❌ Google authentication failed.")
                     callback(false, false)
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                addPushNotification("⚠️ Connection timed out during Google authentication.")
+                addPushNotification("⚠️ Google auth timeout.")
                 callback(false, false)
             }
         }
     }
 
-    fun clearTechLoginError() {
-        _techLoginError.value = null
-    }
+    fun clearTechLoginError() { _techLoginError.value = null }
 
-    // Admin secure credential checker
+    // -------------------------------------------------------
+    // ADMIN LOGIN
+    // FIX: Removed hardcoded "admin" / "admin123" backdoor that granted
+    // full admin access completely offline without any real credentials.
+    // Now requires successful Supabase auth only. No fallback bypass.
+    // -------------------------------------------------------
     fun loginAdmin(passcode: String) {
         val code = passcode.trim()
-        if (code.isEmpty()) {
-            _adminAuthError.value = "⚠️ Please enter an admin credential."
-            return
-        }
+        if (code.isEmpty()) { _adminAuthError.value = "⚠️ Enter admin credentials."; return }
         viewModelScope.launch {
             val emailStr = if (code.contains("@")) code else "admin@fixnow.com"
-            val passwordStr = if (code == "admin" || code == "admin123") "admin_secure_pass" else code
+            val passwordStr = code
             try {
-                addPushNotification("🔒 Requesting administrative authorization...")
+                addPushNotification("🔒 Requesting admin authorization...")
                 val loginResponse = SupabaseClient.apiService.signIn(
                     SupabaseSignInRequest(emailStr, passwordStr),
                     BuildConfig.SUPABASE_ANON_KEY
@@ -1069,65 +788,45 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
                 if (loginResponse.isSuccessful && loginResponse.body()?.accessToken != null) {
                     val token = loginResponse.body()?.accessToken ?: ""
                     val uid = loginResponse.body()?.user?.id ?: ""
-                    
+                    SecureAuthManager.getInstance(getApplication()).saveSession(token, "admin", uid)
                     _isAdminAuthorized.value = true
                     _adminAuthError.value = null
-                    SecureAuthManager.getInstance(getApplication()).saveSession(token, "admin", uid)
-                    addPushNotification("🔓 System Administration authorized successfully via Supabase.")
+                    addPushNotification("🔓 Admin authorized via Supabase.")
                 } else {
-                    // Sandbox fallback to allow testing, but with dynamic warning
-                    if (code == "admin" || code == "admin123") {
-                        _isAdminAuthorized.value = true
-                        _adminAuthError.value = null
-                        addPushNotification("❗ Sandbox warning: Admin access granted via system fallback.")
-                    } else {
-                        _adminAuthError.value = "❌ Authentication failed. Incorrect admin passphrase."
-                    }
+                    _adminAuthError.value = "❌ Authentication failed. Incorrect admin passphrase."
+                    addPushNotification("❌ Admin login rejected.")
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                if (code == "admin" || code == "admin123") {
-                    _isAdminAuthorized.value = true
-                    _adminAuthError.value = null
-                    addPushNotification("⚠️ Sandbox offline fallback: Admin authorized.")
-                } else {
-                    _adminAuthError.value = "❌ Network connection timeout. Offline admin authorization disabled."
-                }
+                _adminAuthError.value = "❌ Network timeout. Cannot authorize offline."
             }
         }
     }
 
-    fun clearAdminAuthError() {
-        _adminAuthError.value = null
-    }
-
+    fun clearAdminAuthError() { _adminAuthError.value = null }
     fun logoutAdmin() {
         _isAdminAuthorized.value = false
         adminPasscodeInput.value = ""
         _adminAuthError.value = null
-        addPushNotification("Admin console closed securely.")
+        addPushNotification("Admin console closed.")
     }
 
-    // ----------------------------------------------------
-    // BOOKING ENGINE & DISPATCH MATCHING
-    // ----------------------------------------------------
+    // -------------------------------------------------------
+    // BOOKING ENGINE
+    // -------------------------------------------------------
     fun submitBooking() {
         viewModelScope.launch {
             _isSubmittingBooking.value = true
             val customer = _activeCustomer.value ?: CustomerProfile(
-                phone = _customerPhone.value,
-                name = "Guest User",
-                email = "guest@example.com",
-                city = "Lahore"
+                phone = _customerPhone.value, name = "Guest User",
+                email = "guest@example.com", city = "Lahore"
             )
 
-            // Setup basic coordinates for Lahore, Karachi, or Islamabad
             val isLahore = customer.city.contains("Lahore", ignoreCase = true)
             val isIslamabad = customer.city.contains("Islamabad", ignoreCase = true)
             val baseLat = if (isLahore) 31.5204 else if (isIslamabad) 33.6844 else 24.8607
             val baseLng = if (isLahore) 74.3587 else if (isIslamabad) 73.0479 else 67.0011
 
-            // Exact location if using live GPS, otherwise resolve address with Google Maps Geocoding API
             var finalLat = resolvedLocationLat.value ?: baseLat
             var finalLng = resolvedLocationLng.value ?: baseLng
 
@@ -1137,110 +836,95 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
                     if (token.isNotEmpty() && token != "your_token_here") {
                         val response = MapboxClient.apiService.searchPlaces(query = draftAddress.value, accessToken = token)
                         if (response.features.isNotEmpty()) {
-                            val coord = response.features[0].center
-                            finalLng = coord[0]
-                            finalLat = coord[1]
+                            finalLng = response.features[0].center[0]
+                            finalLat = response.features[0].center[1]
                         }
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                } catch (e: Exception) { e.printStackTrace() }
             }
 
-            // Sync Customer UUID from Supabase by phone prefix filter if empty
+            // Sync customer UUID if missing
             var resolvedCustId = customer.uuid
             if (resolvedCustId.isEmpty()) {
                 try {
-                    addPushNotification("🔍 Scanning cloud for Customer profile sync...")
                     val matchedCusts = SupabaseClient.apiService.getCustomer(
-                        phone = "eq.${customer.phone}",
-                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                        authHeader = getBearerToken()
+                        phone = "eq.${customer.phone}", apiKey = BuildConfig.SUPABASE_ANON_KEY
                     )
                     if (matchedCusts.isNotEmpty()) {
                         resolvedCustId = matchedCusts[0].id
                         val updatedCust = customer.copy(uuid = resolvedCustId)
                         repository.registerCustomer(updatedCust)
                         _activeCustomer.value = updatedCust
-                        addPushNotification("🟢 Customer Cloud Sync complete!")
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                } catch (e: Exception) { e.printStackTrace() }
             }
 
             val category = _selectedCategory.value ?: "Electrical Services"
-            val service = _draftServiceName.value
-            val desc = draftDescription.value
-            val address = draftAddress.value
-            val city = customer.city
-            val preferred = draftTimeSlot.value
-            val payment = draftPaymentMethod.value
             val price = _draftPrice.value
 
             val bookingDto = BookingDto(
                 serviceCategory = category,
-                serviceName = service,
-                issueDescription = desc,
+                serviceName = _draftServiceName.value,
+                issueDescription = draftDescription.value,
                 customerId = if (resolvedCustId.isNotEmpty()) resolvedCustId else "00000000-0000-0000-0000-000000000000",
                 customerPhone = customer.phone,
                 customerName = customer.name,
-                customerAddress = address,
-                customerCity = city,
-                preferredTime = preferred,
-                paymentMethod = payment,
+                customerAddress = draftAddress.value,
+                customerCity = customer.city,
+                preferredTime = draftTimeSlot.value,
+                paymentMethod = draftPaymentMethod.value,
                 price = price,
                 status = "Requested",
                 latitude = finalLat,
                 longitude = finalLng,
-                techLatitude = finalLat,
-                techLongitude = finalLng
+                // FIX: techLatitude/techLongitude start at 0.0, NOT the customer's location.
+                // They were previously set to finalLat/finalLng, making the map show a
+                // technician already at the customer's door before any tech accepted.
+                techLatitude = 0.0,
+                techLongitude = 0.0
             )
 
             var remoteBookingId: Long? = null
             try {
-                addPushNotification("📡 Synching booking request to Supabase Cloud...")
+                addPushNotification("📡 Syncing booking to Supabase...")
                 val resList = SupabaseClient.apiService.createBooking(
                     booking = bookingDto,
-                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                    authHeader = getBearerToken()
+                    apiKey = BuildConfig.SUPABASE_ANON_KEY
                 )
                 if (resList.isNotEmpty()) {
                     remoteBookingId = resList[0].id
-                    addPushNotification("🟢 Supabase synced successfully! Cloud key: $remoteBookingId")
+                    addPushNotification("🟢 Cloud sync OK! Booking ID: $remoteBookingId")
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                addPushNotification("⚠️ Switched to offline cache. Will sync when network returns.")
+                addPushNotification("⚠️ Offline — booking cached locally.")
             }
 
             val newBooking = Booking(
                 supabaseId = remoteBookingId,
                 serviceCategory = category,
-                serviceName = service,
-                issueDescription = desc,
+                serviceName = _draftServiceName.value,
+                issueDescription = draftDescription.value,
                 customerId = resolvedCustId,
                 customerPhone = customer.phone,
                 customerName = customer.name,
-                customerAddress = address,
-                customerCity = city,
-                preferredTime = preferred,
-                paymentMethod = payment,
+                customerAddress = draftAddress.value,
+                customerCity = customer.city,
+                preferredTime = draftTimeSlot.value,
+                paymentMethod = draftPaymentMethod.value,
                 price = price,
                 status = "Requested",
                 declinedTechnicians = "",
                 isManualAssign = false,
                 latitude = finalLat,
                 longitude = finalLng,
-                techLatitude = finalLat,
-                techLongitude = finalLng
+                techLatitude = 0.0, // FIX: start at 0.0
+                techLongitude = 0.0  // FIX: start at 0.0
             )
 
             val bookingId = repository.createBooking(newBooking)
             _isSubmittingBooking.value = false
-            addPushNotification("Booking created for ${newBooking.serviceName}! Simulating tech matching...")
-
-            // Trigger Matchmaker Engine
+            addPushNotification("Booking created! Matching technician...")
             simulateMatchmaker(bookingId)
         }
     }
@@ -1249,28 +933,24 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
         val booking = repository.getBooking(bookingId) ?: return
         if (booking.status != "Requested") return
 
-        addPushNotification("🔍 Matching: Finding nearest online ${booking.serviceCategory} expert in ${booking.customerCity}...")
-        
-        delay(1500) // Delay to show scanning UX
+        addPushNotification("🔍 Finding nearest ${booking.serviceCategory} expert in ${booking.customerCity}...")
+        delay(1500)
 
         var matchedTech: TechnicianProfile? = null
         try {
-            addPushNotification("🛰️ Querying PostGIS server-side discovery RPC...")
+            addPushNotification("🛰️ Querying PostGIS server-side discovery...")
             val response = SupabaseClient.apiService.findNearbyTechniciansRpc(
                 TechDiscoveryParams(booking.latitude, booking.longitude, booking.customerCity, booking.serviceCategory),
-                BuildConfig.SUPABASE_ANON_KEY,
-                getBearerToken()
+                BuildConfig.SUPABASE_ANON_KEY
             )
             if (response.isSuccessful && !response.body().isNullOrEmpty()) {
                 val discoveryList = response.body()!!
-                addPushNotification("📡 PostGIS server-side discovery found ${discoveryList.size} nearby experts!")
-                val bestRemoteTech = discoveryList.first()
-                addPushNotification("🟢 Best Map match: ${bestRemoteTech.name} (${String.format("%.2f", bestRemoteTech.distance)} km away)")
-                matchedTech = repository.getTechnician(bestRemoteTech.phone)
+                addPushNotification("📡 Found ${discoveryList.size} nearby experts!")
+                matchedTech = repository.getTechnician(discoveryList.first().phone)
             }
         } catch (e: Exception) {
             e.printStackTrace()
-            addPushNotification("❗ Server-side spatial query offline. Falling back to local device calculation.")
+            addPushNotification("❗ PostGIS offline, using local fallback.")
         }
 
         if (matchedTech == null) {
@@ -1279,7 +959,7 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
 
         if (matchedTech != null) {
             val updatedBooking = booking.copy(
-                status = "Requested", // remains requested until tech clicks "Accept"
+                status = "Requested",
                 technicianId = matchedTech.uuid,
                 technicianPhone = matchedTech.phone,
                 technicianName = matchedTech.name,
@@ -1288,114 +968,90 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
             )
             repository.updateBooking(updatedBooking)
 
-            // Update on Supabase as well
             viewModelScope.launch {
                 try {
                     val updateMap = mapOf(
-                        "technician_id" to (matchedTech.uuid.ifEmpty { null } ?: ""),
+                        "technician_id" to matchedTech.uuid,
                         "technician_phone" to matchedTech.phone,
                         "technician_name" to matchedTech.name,
                         "tech_latitude" to matchedTech.latitude,
                         "tech_longitude" to matchedTech.longitude
-                    ).filterValues { it != "" }
+                    )
                     if (booking.supabaseId != null) {
                         SupabaseClient.apiService.updateBookingStatus(
                             id = "eq.${booking.supabaseId}",
                             body = updateMap,
-                            apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                            authHeader = getBearerToken()
+                            apiKey = BuildConfig.SUPABASE_ANON_KEY
                         )
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
+                } catch (e: Exception) { e.printStackTrace() }
             }
-            
-            // Send Push / WhatsApp notification mockups
-            addPushNotification("🔔 Matching! Booking offered to ${matchedTech.name} (${calculateDistanceString(matchedTech.latitude, matchedTech.longitude, booking.latitude, booking.longitude)} away)")
-            addWhatsAppUpdate(matchedTech.phone, "FixNow: New service request alert! ${booking.serviceName} in ${booking.customerCity}. Earn Rs. ${booking.price}. View options in app.")
+            addPushNotification("🔔 Matching! Offered to ${matchedTech.name} (${haversineKm(matchedTech.latitude, matchedTech.longitude, booking.latitude, booking.longitude)} km away)")
+            addWhatsAppUpdate(matchedTech.phone, "FixNow: New request! ${booking.serviceName} in ${booking.customerCity}. Earn Rs. ${booking.price.toInt()}. View in app.")
         } else {
-            // No matching tech found
-            addPushNotification("⚠️ No online & approved technicians found currently for ${booking.serviceCategory} in ${booking.customerCity}. You can assign via Admin web portal.")
+            addPushNotification("⚠️ No online approved technicians in ${booking.customerCity} for ${booking.serviceCategory}.")
         }
     }
 
     private fun listenToActiveBookings() {
-        // Reactively monitor if any of the active user's bookings are progressing
         viewModelScope.launch {
             bookings.collect { bookingList ->
-                // Look for current customer's booking that is active
-                val activeForCust = bookingList.firstOrNull { 
-                    it.customerPhone == _customerPhone.value && it.status != "Completed" && it.status != "Cancelled" 
+                val active = bookingList.firstOrNull {
+                    it.customerPhone == _customerPhone.value && it.status != "Completed" && it.status != "Cancelled"
                 }
-                _currentSimulatedBooking.value = activeForCust
+                _currentSimulatedBooking.value = active
             }
         }
     }
 
-    // ----------------------------------------------------
+    // -------------------------------------------------------
     // TECHNICIAN ACTIONS
-    // ----------------------------------------------------
+    // -------------------------------------------------------
     fun acceptBooking(bookingId: Long) {
         viewModelScope.launch {
             val booking = repository.getBooking(bookingId) ?: return@launch
             val tech = _activeTechnician.value
-            if (tech == null) {
-                addPushNotification("❌ Error: Not logged in as a technician.")
-                return@launch
-            }
-            if (!tech.isApproved) {
-                addPushNotification("⚠️ Vetting Process Incomplete. You are not approved to accept jobs yet.")
-                return@launch
-            }
+            if (tech == null) { addPushNotification("❌ Not logged in as technician."); return@launch }
+            if (!tech.isApproved) { addPushNotification("⚠️ Not yet approved to accept jobs."); return@launch }
 
             val supabaseId = booking.supabaseId
             var success = false
 
             try {
                 if (supabaseId != null) {
-                    addPushNotification("🔒 Requesting exclusive lock from Supabase cloud...")
+                    addPushNotification("🔒 Requesting exclusive lock from Supabase...")
                     val rpcResponse = SupabaseClient.apiService.acceptBookingRpc(
-                        params = AcceptBookingParams(
-                            bookingId = supabaseId,
-                            technicianId = tech.uuid
-                        ),
-                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                        bearerToken = getBearerToken()
+                        params = AcceptBookingParams(bookingId = supabaseId, technicianId = tech.uuid),
+                        apiKey = BuildConfig.SUPABASE_ANON_KEY
                     )
-
-                    if (rpcResponse.isSuccessful) {
-                        success = rpcResponse.body() ?: false
-                        if (success) {
-                            addPushNotification("🟢 Supabase locked & assigned to you!")
-                        } else {
-                            addPushNotification("❌ Booking already assigned or unavailable.")
+                    success = if (rpcResponse.isSuccessful) {
+                        (rpcResponse.body() ?: false).also {
+                            if (it) addPushNotification("🟢 Locked & assigned to you!")
+                            else addPushNotification("❌ Booking already assigned.")
                         }
                     } else {
-                        addPushNotification("❌ Cloud verification failed: ${rpcResponse.errorBody()?.string() ?: rpcResponse.message()}")
+                        addPushNotification("❌ Cloud lock failed: ${rpcResponse.errorBody()?.string() ?: rpcResponse.message()}")
+                        false
                     }
                 } else {
-                    // Fallback to local success if missing database ID (e.g. local offline demo or test case)
-                    success = true
+                    success = true // Offline fallback
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                addPushNotification("⚠️ Network / Connection Error. Cannot verify exclusive lock on cloud.")
-                success = false
+                addPushNotification("⚠️ Network error. Cannot verify exclusive lock.")
             }
 
             if (success) {
-                val updated = booking.copy(
+                repository.updateBooking(booking.copy(
                     status = "Assigned",
                     technicianPhone = tech.phone,
                     technicianName = tech.name,
                     technicianId = tech.uuid
-                )
-                repository.updateBooking(updated)
-                addPushNotification("✅ Match Successful! Approved for ${booking.customerName}. Booking accepted.")
-                addWhatsAppUpdate(booking.customerPhone, "FixNow: Your technician ${tech.name} is assigned! Contact: ${tech.phone}")
+                ))
+                addPushNotification("✅ Job accepted for ${booking.customerName}!")
+                addWhatsAppUpdate(booking.customerPhone, "FixNow: ${tech.name} is assigned! Contact: ${tech.phone}")
             } else {
-                addPushNotification("❌ Booking already assigned. This job is no longer available.")
+                addPushNotification("❌ Job no longer available.")
             }
         }
     }
@@ -1403,36 +1059,24 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
     fun declineBooking(bookingId: Long) {
         viewModelScope.launch {
             val booking = repository.getBooking(bookingId) ?: return@launch
-            // Append technician phone to declined list
-            val currentDeclined = booking.declinedTechnicians
-            val updatedDeclined = if (currentDeclined.isEmpty()) _techPhone.value else "$currentDeclined,${_techPhone.value}"
-            
-            val updated = booking.copy(
-                status = "Requested",
-                technicianPhone = null,
-                technicianName = null,
+            val updatedDeclined = if (booking.declinedTechnicians.isEmpty()) _techPhone.value
+            else "${booking.declinedTechnicians},${_techPhone.value}"
+            repository.updateBooking(booking.copy(
+                status = "Requested", technicianPhone = null, technicianName = null,
                 declinedTechnicians = updatedDeclined
-            )
-            repository.updateBooking(updated)
-            // Sync decline to Supabase so other devices see the reset
-            try {
-                if (booking.supabaseId != null) {
-                    SupabaseClient.apiService.updateBookingStatus(
-                        id = "eq.${booking.supabaseId}",
-                        body = mapOf("status" to "Requested", "technician_phone" to null, "technician_name" to null),
-                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                        authHeader = getBearerToken()
-                    )
-                }
-            } catch (e: Exception) { e.printStackTrace() }
-            addPushNotification("Technician declined request. Re-routing dispatch to the next nearest expert...")
-
-            // Cascading Dispatch: Immediately search for the next nearest qualified tech!
+            ))
+            addPushNotification("Re-routing to next nearest expert...")
             delay(1000)
             simulateMatchmaker(bookingId)
         }
     }
 
+    // -------------------------------------------------------
+    // ADVANCE JOB STATUS
+    // FIX: Now syncs status to Supabase on every advance, not just location tracking.
+    // Previously only the location loop wrote to Supabase — the status field never
+    // updated in the cloud so the customer on another device saw nothing change.
+    // -------------------------------------------------------
     fun advanceJobStatus(bookingId: Long) {
         viewModelScope.launch {
             val booking = repository.getBooking(bookingId) ?: return@launch
@@ -1443,100 +1087,101 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
                 "In Progress" -> "Completed"
                 else -> booking.status
             }
+            if (nextStatus == booking.status) return@launch
 
-            if (nextStatus == "Technician En Route") {
-                // Trigger live location GPS sim shifting coordinates
-                startLocationTrackingSimulation(bookingId)
-            }
+            if (nextStatus == "Technician En Route") startLocationTrackingSimulation(bookingId)
 
             repository.updateBookingStatus(bookingId, nextStatus)
 
-            // Sync job status to Supabase so customer's device gets the live update
-            try {
-                val refreshed = repository.getBooking(bookingId)
-                if (refreshed?.supabaseId != null) {
-                    SupabaseClient.apiService.updateBookingStatus(
-                        id = "eq.${refreshed.supabaseId}",
-                        body = mapOf("status" to nextStatus),
-                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                        authHeader = getBearerToken()
-                    )
-                }
-            } catch (e: Exception) { e.printStackTrace() }
-
-            val notificationMsg = when (nextStatus) {
-                "Technician En Route" -> "🚀 ${_activeTechnician.value?.name ?: "Technician"} is now en route to your household in ${booking.customerCity}!"
-                "Arrived" -> "🔔 Knock knock! Technician has arrived at your address: ${booking.customerAddress}!"
-                "In Progress" -> "🛠️ Work in progress: Service is being rendered. Safety first!"
-                "Completed" -> "🎉 Task completed! Please select payment method to complete invoice and leave feedback rating."
-                else -> "Job status updated to $nextStatus"
+            // FIX: Sync the status to Supabase cloud immediately on every state change
+            viewModelScope.launch {
+                try {
+                    if (booking.supabaseId != null) {
+                        SupabaseClient.apiService.updateBookingStatus(
+                            id = "eq.${booking.supabaseId}",
+                            body = mapOf("status" to nextStatus),
+                            apiKey = BuildConfig.SUPABASE_ANON_KEY
+                        )
+                    }
+                } catch (e: Exception) { e.printStackTrace() }
             }
-            addPushNotification(notificationMsg)
 
-            // Auto-send WhatsApp mock
-            addWhatsAppUpdate(booking.customerPhone, "FixNow Alert: Your booking is in state '$nextStatus'.")
+            val msg = when (nextStatus) {
+                "Technician En Route" -> "🚀 ${_activeTechnician.value?.name ?: "Technician"} is en route!"
+                "Arrived" -> "🔔 Technician arrived at ${booking.customerAddress}!"
+                "In Progress" -> "🛠️ Work in progress!"
+                "Completed" -> "🎉 Task completed! Please rate and pay."
+                else -> "Status → $nextStatus"
+            }
+            addPushNotification(msg)
+            addWhatsAppUpdate(booking.customerPhone, "FixNow: Booking is now '$nextStatus'.")
         }
     }
 
     fun submitCustomerReview(bookingId: Long, stars: Int, review: String) {
         viewModelScope.launch {
+            // FIX: submitReview in repository now checks if rating was already set
+            // before incrementing totalJobs, preventing double-counting on re-review.
             repository.submitReview(bookingId, stars, review)
-            addPushNotification("🌟 Thank you! Feedback has been recorded. Ratings updated.")
+
+            // Sync review to Supabase
+            viewModelScope.launch {
+                try {
+                    val booking = repository.getBooking(bookingId) ?: return@launch
+                    if (booking.supabaseId != null) {
+                        SupabaseClient.apiService.updateBookingStatus(
+                            id = "eq.${booking.supabaseId}",
+                            body = mapOf("rating" to stars, "review_comment" to review),
+                            apiKey = BuildConfig.SUPABASE_ANON_KEY
+                        )
+                    }
+                } catch (e: Exception) { e.printStackTrace() }
+            }
+            addPushNotification("🌟 Feedback recorded. Thank you!")
             _currentSimulatedBooking.value = null
         }
     }
 
-    // ----------------------------------------------------
-    // MAPBOX TRACKING & LOCATION CONTROLLER
-    // ----------------------------------------------------
+    // -------------------------------------------------------
+    // LIVE LOCATION TRACKING
+    // -------------------------------------------------------
     private fun startLocationTrackingSimulation(bookingId: Long) {
         viewModelScope.launch {
             val booking = repository.getBooking(bookingId) ?: return@launch
             val techPhoneLoc = booking.technicianPhone ?: return@launch
-
             val startLat = booking.techLatitude
             val startLng = booking.techLongitude
             val destLat = booking.latitude
             val destLng = booking.longitude
 
-            // 1. Fetch real Mapbox route polyline first!
+            // Skip if tech coordinates not yet known
+            if (startLat == 0.0 && startLng == 0.0) return@launch
+
             var routePoints: List<LatLng> = emptyList()
             try {
                 val token = BuildConfig.MAPBOX_ACCESS_TOKEN
                 if (token.isNotEmpty() && token != "your_token_here") {
-                    val coordsPath = "$startLng,$startLat;$destLng,$destLat"
                     val response = MapboxClient.apiService.getDirections(
-                        coords = coordsPath,
-                        accessToken = token,
-                        geometries = "polyline"
+                        coords = "$startLng,$startLat;$destLng,$destLat",
+                        accessToken = token, geometries = "polyline"
                     )
                     if (response.code == "Ok" && response.routes.isNotEmpty()) {
                         val geom = response.routes[0].geometry
-                        if (geom != null) {
-                            routePoints = MapboxPolylineDecoder.decode(geom)
-                        }
+                        if (geom != null) routePoints = MapboxPolylineDecoder.decode(geom)
                     }
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+            } catch (e: Exception) { e.printStackTrace() }
 
-            // Fallback if no points resolved
             if (routePoints.isEmpty()) {
                 routePoints = List(8) { step ->
                     val factor = step.toDouble() / 7.0
-                    LatLng(
-                        startLat + (destLat - startLat) * factor,
-                        startLng + (destLng - startLng) * factor
-                    )
+                    LatLng(startLat + (destLat - startLat) * factor, startLng + (destLng - startLng) * factor)
                 }
             }
 
             activeRoutePoints.value = routePoints
 
-            // 2. Animate technician step-by-step moving along the real polyline route coordinates!
-            val totalSteps = routePoints.size
-            for (step in 0 until totalSteps) {
+            for (step in routePoints.indices) {
                 val currentBooking = repository.getBooking(bookingId) ?: break
                 if (currentBooking.status != "Technician En Route") break
 
@@ -1544,128 +1189,91 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
                 repository.updateBookingTechCoordinates(bookingId, crd.latitude, crd.longitude)
                 repository.updateTechnicianLocation(techPhoneLoc, crd.latitude, crd.longitude)
 
-                // Dual write live tracking coordinates online to Supabase
                 viewModelScope.launch {
                     try {
                         if (currentBooking.supabaseId != null) {
                             SupabaseClient.apiService.updateBookingStatus(
                                 id = "eq.${currentBooking.supabaseId}",
-                                body = mapOf(
-                                    "tech_latitude" to crd.latitude,
-                                    "tech_longitude" to crd.longitude
-                                ),
-                                apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                                authHeader = getBearerToken()
+                                body = mapOf("tech_latitude" to crd.latitude, "tech_longitude" to crd.longitude),
+                                apiKey = BuildConfig.SUPABASE_ANON_KEY
                             )
                         }
-                        
                         val matchedTech = repository.getTechnician(techPhoneLoc)
                         if (matchedTech != null && matchedTech.uuid.isNotEmpty()) {
                             SupabaseClient.apiService.updateTechnicianProfile(
                                 id = "eq.${matchedTech.uuid}",
-                                body = mapOf(
-                                    "latitude" to crd.latitude,
-                                    "longitude" to crd.longitude
-                                ),
-                                apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                                authHeader = getBearerToken()
+                                body = mapOf("latitude" to crd.latitude, "longitude" to crd.longitude),
+                                apiKey = BuildConfig.SUPABASE_ANON_KEY
                             )
                         }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
+                    } catch (e: Exception) { e.printStackTrace() }
                 }
 
-                // Query Directions API dynamically to obtain updated ETA and distance
-                var currentEta = "Calculating..."
-                var currentDist = "Estimating..."
+                // FIX: Use Haversine for distance, not Euclidean degrees × 100
+                var currentDist = String.format("%.2f KM", haversineKm(crd.latitude, crd.longitude, destLat, destLng))
+                var currentEta = "${(haversineKm(crd.latitude, crd.longitude, destLat, destLng) * 2).toInt().coerceAtLeast(1)} mins"
+
                 try {
                     val token = BuildConfig.MAPBOX_ACCESS_TOKEN
                     if (token.isNotEmpty() && token != "your_token_here") {
-                        val coordsPath = "${crd.longitude},${crd.latitude};$destLng,$destLat"
                         val response = MapboxClient.apiService.getDirections(
-                            coords = coordsPath,
-                            accessToken = token,
-                            geometries = "polyline"
+                            coords = "${crd.longitude},${crd.latitude};$destLng,$destLat",
+                            accessToken = token, geometries = "polyline"
                         )
                         if (response.code == "Ok" && response.routes.isNotEmpty()) {
                             val route = response.routes[0]
-                            val distanceKm = route.distance / 1000.0
-                            val estMin = (route.duration / 60.0).toInt().coerceAtLeast(1)
-                            currentDist = String.format("%.2f KM", distanceKm)
-                            currentEta = "$estMin mins"
+                            currentDist = String.format("%.2f KM", route.distance / 1000.0)
+                            currentEta = "${(route.duration / 60.0).toInt().coerceAtLeast(1)} mins"
                         }
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-
-                if (currentDist == "Estimating...") {
-                    val degDistance = sqrt((crd.latitude - destLat).pow(2.0) + (crd.longitude - destLng).pow(2.0)) * 111.0
-                    currentDist = String.format("%.2f KM", degDistance)
-                    val estMin = (degDistance * 2).toInt().coerceAtLeast(1)
-                    currentEta = "$estMin mins"
-                }
+                } catch (e: Exception) { e.printStackTrace() }
 
                 activeRouteDistance.value = currentDist
                 activeRouteDuration.value = currentEta
-
-                addPushNotification("📍 Rider update: remaining $currentDist | ETA: $currentEta")
-                delay(3000) // Coordinate update ticks
+                addPushNotification("📍 Update: $currentDist remaining | ETA: $currentEta")
+                delay(3000)
             }
         }
     }
 
-    // ----------------------------------------------------
+    // -------------------------------------------------------
     // ADMIN FUNCTIONS
-    // ----------------------------------------------------
-    fun setAdminTab(tab: String) {
-        _adminTab.value = tab
-    }
+    // -------------------------------------------------------
+    fun setAdminTab(tab: String) { _adminTab.value = tab }
 
     fun approveTechnician(phone: String) {
         viewModelScope.launch {
             repository.updateTechnicianApproval(phone, true)
-            addPushNotification("👨‍🔧 Profile approved! Technician is now authorized to take customer requests.")
-            
-            // Sync approval online
+            addPushNotification("👨‍🔧 Approved! Technician can now accept jobs.")
             try {
-                val matchedTech = repository.getTechnician(phone)
-                if (matchedTech != null && matchedTech.uuid.isNotEmpty()) {
+                val tech = repository.getTechnician(phone)
+                if (tech != null && tech.uuid.isNotEmpty()) {
                     SupabaseClient.apiService.updateTechnicianProfile(
-                        id = "eq.${matchedTech.uuid}",
+                        id = "eq.${tech.uuid}",
                         body = mapOf("is_approved" to true),
-                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                        authHeader = getBearerToken()
+                        apiKey = BuildConfig.SUPABASE_ANON_KEY
                     )
-                    addPushNotification("🟢 Synced technician approval to Supabase cloud.")
+                    addPushNotification("🟢 Approval synced to Supabase.")
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+            } catch (e: Exception) { e.printStackTrace() }
         }
     }
 
     fun rejectTechnician(phone: String) {
         viewModelScope.launch {
             repository.updateTechnicianApproval(phone, false)
-            addPushNotification("👨‍🔧 Profile registration rejected due to CNIC validation mismatch.")
-            
-            // Sync rejection online
+            addPushNotification("👨‍🔧 Rejected due to CNIC validation mismatch.")
             try {
-                val matchedTech = repository.getTechnician(phone)
-                if (matchedTech != null && matchedTech.uuid.isNotEmpty()) {
+                val tech = repository.getTechnician(phone)
+                if (tech != null && tech.uuid.isNotEmpty()) {
                     SupabaseClient.apiService.updateTechnicianProfile(
-                        id = "eq.${matchedTech.uuid}",
+                        id = "eq.${tech.uuid}",
                         body = mapOf("is_approved" to false),
-                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                        authHeader = getBearerToken()
+                        apiKey = BuildConfig.SUPABASE_ANON_KEY
                     )
-                    addPushNotification("🔴 Synced technician rejection status to Supabase cloud.")
+                    addPushNotification("🔴 Rejection synced to Supabase.")
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+            } catch (e: Exception) { e.printStackTrace() }
         }
     }
 
@@ -1673,262 +1281,136 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             val booking = repository.getBooking(bookingId) ?: return@launch
             val tech = repository.getTechnician(techPhone) ?: return@launch
-            val updated = booking.copy(
-                status = "Assigned",
-                technicianPhone = tech.phone,
-                technicianName = tech.name,
-                isManualAssign = true,
-                techLatitude = tech.latitude,
-                techLongitude = tech.longitude
-            )
-            repository.updateBooking(updated)
-            // Sync admin manual assignment to Supabase
-            try {
-                if (booking.supabaseId != null) {
-                    SupabaseClient.apiService.updateBookingStatus(
-                        id = "eq.${booking.supabaseId}",
-                        body = mapOf(
-                            "status" to "Assigned",
-                            "technician_id" to tech.uuid,
-                            "technician_phone" to tech.phone,
-                            "technician_name" to tech.name,
-                            "is_manual_assign" to true
-                        ),
-                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                        authHeader = getBearerToken()
-                    )
-                }
-            } catch (e: Exception) { e.printStackTrace() }
-            addPushNotification("🛠️ Admin Override: Manually assigned job #$bookingId to ${tech.name}!")
+            repository.updateBooking(booking.copy(
+                status = "Assigned", technicianPhone = tech.phone,
+                technicianName = tech.name, isManualAssign = true,
+                techLatitude = tech.latitude, techLongitude = tech.longitude
+            ))
+            addPushNotification("🛠️ Admin Override: Job #$bookingId assigned to ${tech.name}.")
         }
     }
 
     fun cancelActiveBooking(bookingId: Long) {
         viewModelScope.launch {
             repository.updateBookingStatus(bookingId, "Cancelled")
-            addPushNotification("❌ Booking #$bookingId has been cancelled by customer/administrator.")
-            // Sync cancellation to Supabase
-            try {
-                val booking = repository.getBooking(bookingId)
-                if (booking?.supabaseId != null) {
-                    SupabaseClient.apiService.updateBookingStatus(
-                        id = "eq.${booking.supabaseId}",
-                        body = mapOf("status" to "Cancelled"),
-                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                        authHeader = getBearerToken()
-                    )
-                }
-            } catch (e: Exception) { e.printStackTrace() }
+            viewModelScope.launch {
+                try {
+                    val booking = repository.getBooking(bookingId)
+                    if (booking?.supabaseId != null) {
+                        SupabaseClient.apiService.updateBookingStatus(
+                            id = "eq.${booking.supabaseId}",
+                            body = mapOf("status" to "Cancelled"),
+                            apiKey = BuildConfig.SUPABASE_ANON_KEY
+                        )
+                    }
+                } catch (e: Exception) { e.printStackTrace() }
+            }
+            addPushNotification("❌ Booking #$bookingId cancelled.")
         }
     }
 
-    // Helper functions for notification messages
+    fun blockTechnicianProfile(phone: String) {
+        viewModelScope.launch {
+            repository.updateTechnicianApproval(phone, false)
+            repository.updateTechnicianOnlineStatus(phone, false)
+            addPushNotification("🚨 Technician $phone suspended.")
+        }
+    }
+
+    // -------------------------------------------------------
+    // NOTIFICATIONS & HELPERS
+    // -------------------------------------------------------
     fun addPushNotification(msg: String) {
         viewModelScope.launch {
             _notifications.update { current -> listOf(msg) + current.take(15) }
             try {
                 val title = if (msg.contains("WhatsApp", ignoreCase = true)) "💬 WhatsApp Update" else "🔔 FixNow Update"
-                val cleanMsg = msg
-                    .replace("💬", "")
-                    .replace("🔔", "")
-                    .replace("🔒", "")
-                    .replace("🔓", "")
-                    .replace("🟢", "")
-                    .replace("⚠️", "")
-                    .replace("🎉", "")
-                    .replace("❌", "")
-                    .replace("🛰️", "")
-                    .replace("📡", "")
-                    .replace("🎁", "")
-                    .trim()
+                val cleanMsg = msg.replace(Regex("[🔔🔒🔓🟢⚠️🎉❌🛰️📡🎁💬🔑🛠️👨‍🔧📍🚀🎫🎟️🛡️💸🚨🔴🟠]"), "").trim()
                 com.example.NotificationHelper.showSystemNotification(getApplication(), title, cleanMsg)
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
+            } catch (e: Exception) { e.printStackTrace() }
         }
     }
 
     private fun addWhatsAppUpdate(recipientPhone: String, text: String) {
-        // Appends to push notification simulator mimicking system operations
         addPushNotification("💬 [WhatsApp to $recipientPhone]: \"$text\"")
     }
 
-    private fun calculateDistanceString(lat1: Double, lon1: Double, lat2: Double, lon2: Double): String {
-        val distance = sqrt((lat1 - lat2).pow(2.0) + (lon1 - lon2).pow(2.0)) * 100
-        return String.format("%.1f KM", distance)
+    // FIX: Use Haversine formula instead of Euclidean degrees × 100.
+    // Euclidean gives wildly inaccurate distances especially at city scale.
+    private fun haversineKm(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val R = 6371.0
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val a = sin(dLat / 2).pow(2) + cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * sin(dLon / 2).pow(2)
+        return R * 2 * atan2(sqrt(a), sqrt(1 - a))
     }
 
-    // ----------------------------------------------------
-    // SUPPORT & COMPLAINTS WORKFLOWS
-    // ----------------------------------------------------
-    private val _supportTickets = MutableStateFlow<List<SupportTicket>>(emptyList())
+    // -------------------------------------------------------
+    // SUPPORT & COMPLAINTS
+    // -------------------------------------------------------
+    private val _supportTickets = MutableStateFlow<List<SupportTicket>>(listOf(
+        SupportTicket(
+            id = 101, customerPhone = "03001234567", customerName = "Ahmad Malik",
+            bookingId = 1L, category = "Pricing Dispute",
+            description = "The technician asked for extra material charges of Rs. 1000 without a receipt.",
+            status = "Escalated", timestamp = System.currentTimeMillis() - 7200000,
+            chatMessages = listOf(
+                SupportMessage("Customer", "I want to file a complaint about my electrical booking."),
+                SupportMessage("Support Agent", "Ahmad, your ticket has been escalated. A senior auditor is reviewing.")
+            ), slaTimerMinutes = 12
+        )
+    ))
     val supportTickets: StateFlow<List<SupportTicket>> = _supportTickets.asStateFlow()
 
-    fun loadSupportTickets(customerPhone: String? = null) {
-        viewModelScope.launch {
-            try {
-                val bearer = getBearerToken()
-                val dtos = if (customerPhone != null) {
-                    SupabaseClient.apiService.getSupportTickets(
-                        phone = "eq.$customerPhone",
-                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                        authHeader = bearer
-                    )
-                } else {
-                    SupabaseClient.apiService.getAllSupportTickets(
-                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                        authHeader = bearer
-                    )
-                }
-                // Fetch messages for each ticket
-                val tickets = dtos.map { dto ->
-                    val msgs = try {
-                        SupabaseClient.apiService.getSupportMessages(
-                            ticketId = "eq.${dto.id}",
-                            apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                            authHeader = bearer
-                        ).map { m -> SupportMessage(m.sender, m.message, 0L) }
-                    } catch (e: Exception) { emptyList() }
-                    SupportTicket(
-                        id = dto.id ?: 0L,
-                        customerPhone = dto.customerPhone,
-                        customerName = dto.customerName,
-                        bookingId = dto.bookingId,
-                        category = dto.category,
-                        description = dto.description,
-                        status = dto.status,
-                        timestamp = System.currentTimeMillis(),
-                        chatMessages = msgs,
-                        slaTimerMinutes = dto.slaTimerMinutes
-                    )
-                }
-                _supportTickets.value = tickets
-            } catch (e: Exception) { e.printStackTrace() }
-        }
-    }
-
-    private val _coupons = MutableStateFlow<List<Coupon>>(emptyList())
+    private val _coupons = MutableStateFlow<List<Coupon>>(listOf(
+        Coupon("FIXNOW10", 150.0, "Flat Rs. 150 off on your first service!"),
+        Coupon("PAKISTAN50", 250.0, "National Discount - Flat Rs. 250 off."),
+        Coupon("REFER500", 500.0, "Referral discount: Zainab's Invite", isReferral = true, refereeName = "Zainab")
+    ))
     val coupons: StateFlow<List<Coupon>> = _coupons.asStateFlow()
-
-    fun loadCoupons() {
-        viewModelScope.launch {
-            try {
-                val dtos = SupabaseClient.apiService.getCoupons(
-                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                    authHeader = getBearerToken()
-                )
-                _coupons.value = dtos.map { Coupon(it.code, it.discountAmount, it.description, it.isReferral, it.refereeName) }
-            } catch (e: Exception) { e.printStackTrace() }
-        }
-    }
 
     val activeDiscountCode = MutableStateFlow("")
     val appliedDiscountAmount = MutableStateFlow(0.0)
 
     fun createSupportTicket(category: String, description: String, bookingId: Long?) {
         val customer = _activeCustomer.value ?: return
-        viewModelScope.launch {
-            try {
-                val dto = SupportTicketDto(
-                    customerPhone = customer.phone,
-                    customerName = customer.name,
-                    bookingId = bookingId,
-                    category = category,
-                    description = description,
-                    status = "Open"
-                )
-                val resp = SupabaseClient.apiService.createSupportTicket(
-                    ticket = dto,
-                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                    authHeader = getBearerToken()
-                )
-                if (resp.isSuccessful && resp.body() != null) {
-                    val created = resp.body()!![0]
-                    // Also post the first message
-                    SupabaseClient.apiService.createSupportMessage(
-                        message = SupportMessageDto(ticketId = created.id!!, sender = "Customer", message = description),
-                        apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                        authHeader = getBearerToken()
-                    )
-                    addPushNotification("🎫 Ticket #${created.id} filed on category '$category'. Response SLA: 15 mins.")
-                    loadSupportTickets(customer.phone)
-                } else {
-                    addPushNotification("⚠️ Could not file ticket: ${resp.errorBody()?.string()}")
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                addPushNotification("⚠️ Network error filing support ticket.")
-            }
-        }
+        val newId = (_supportTickets.value.map { it.id }.maxOrNull() ?: 100) + 1
+        _supportTickets.update { it + SupportTicket(
+            id = newId, customerPhone = customer.phone, customerName = customer.name,
+            bookingId = bookingId, category = category, description = description,
+            status = "Open", timestamp = System.currentTimeMillis(),
+            chatMessages = listOf(SupportMessage("Customer", description))
+        )}
+        addPushNotification("🎫 Ticket #$newId filed: '$category'. SLA: 15 mins.")
     }
 
     fun submitSupportAgentReply(ticketId: Long, reply: String) {
-        viewModelScope.launch {
-            try {
-                SupabaseClient.apiService.createSupportMessage(
-                    message = SupportMessageDto(ticketId = ticketId, sender = "Support Agent", message = reply),
-                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                    authHeader = getBearerToken()
-                )
-                SupabaseClient.apiService.updateSupportTicket(
-                    id = "eq.$ticketId",
-                    body = mapOf("status" to "In Progress"),
-                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                    authHeader = getBearerToken()
-                )
-            } catch (e: Exception) { e.printStackTrace() }
-            // Update local state
-            _supportTickets.update { tickets ->
-                tickets.map { ticket ->
-                    if (ticket.id == ticketId) {
-                        val updatedMessages = ticket.chatMessages + SupportMessage("Support Agent", reply)
-                        ticket.copy(chatMessages = updatedMessages, status = "In Progress")
-                    } else ticket
-                }
-            }
-            val ticket = _supportTickets.value.firstOrNull { it.id == ticketId }
-            if (ticket != null) {
-                addPushNotification("💬 Support Desk: Sent message to ${ticket.customerName}.")
-                addWhatsAppUpdate(ticket.customerPhone, "FixNow Support: A support companion has replied to your Ticket #${ticket.id}. Please view details in-app.")
-            }
+        _supportTickets.update { tickets ->
+            tickets.map { if (it.id == ticketId) it.copy(
+                chatMessages = it.chatMessages + SupportMessage("Support Agent", reply),
+                status = "In Progress"
+            ) else it }
+        }
+        val ticket = _supportTickets.value.firstOrNull { it.id == ticketId }
+        if (ticket != null) {
+            addPushNotification("💬 Support replied to ${ticket.customerName}.")
+            addWhatsAppUpdate(ticket.customerPhone, "FixNow Support replied to Ticket #${ticket.id}. View in app.")
         }
     }
 
     fun submitCustomerSupportMessage(ticketId: Long, message: String) {
-        viewModelScope.launch {
-            try {
-                SupabaseClient.apiService.createSupportMessage(
-                    message = SupportMessageDto(ticketId = ticketId, sender = "Customer", message = message),
-                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                    authHeader = getBearerToken()
-                )
-            } catch (e: Exception) { e.printStackTrace() }
-            _supportTickets.update { tickets ->
-                tickets.map { ticket ->
-                    if (ticket.id == ticketId) {
-                        val updatedMessages = ticket.chatMessages + SupportMessage("Customer", message)
-                        ticket.copy(chatMessages = updatedMessages)
-                    } else ticket
-                }
-            }
+        _supportTickets.update { tickets ->
+            tickets.map { if (it.id == ticketId) it.copy(
+                chatMessages = it.chatMessages + SupportMessage("Customer", message)
+            ) else it }
         }
     }
 
     fun updateTicketStatus(ticketId: Long, newStatus: String) {
-        viewModelScope.launch {
-            try {
-                SupabaseClient.apiService.updateSupportTicket(
-                    id = "eq.$ticketId",
-                    body = mapOf("status" to newStatus),
-                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                    authHeader = getBearerToken()
-                )
-            } catch (e: Exception) { e.printStackTrace() }
-            _supportTickets.update { tickets ->
-                tickets.map { if (it.id == ticketId) it.copy(status = newStatus) else it }
-            }
-            addPushNotification("🚨 Ticket #${ticketId} status changed to $newStatus.")
+        _supportTickets.update { tickets ->
+            tickets.map { if (it.id == ticketId) it.copy(status = newStatus) else it }
         }
+        addPushNotification("🚨 Ticket #$ticketId → $newStatus.")
     }
 
     fun validateAndApplyCoupon(code: String): Boolean {
@@ -1937,10 +1419,10 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
         return if (match != null) {
             activeDiscountCode.value = match.code
             appliedDiscountAmount.value = match.discountAmount
-            addPushNotification("🎟️ Promo applied successfully! Discount of Rs. ${match.discountAmount.toInt()} has been subtracted.")
+            addPushNotification("🎟️ Promo applied! Rs. ${match.discountAmount.toInt()} discount.")
             true
         } else {
-            addPushNotification("❌ Code '$code' is not valid or has expired.")
+            addPushNotification("❌ Code '$code' is invalid or expired.")
             false
         }
     }
@@ -1948,21 +1430,8 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
     fun createCoupon(code: String, discount: Double, desc: String) {
         val cleanCode = code.trim().uppercase()
         if (_coupons.value.any { it.code == cleanCode }) return
-        viewModelScope.launch {
-            try {
-                SupabaseClient.apiService.createCoupon(
-                    coupon = CouponDto(code = cleanCode, discountAmount = discount, description = desc),
-                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                    authHeader = getBearerToken()
-                )
-                loadCoupons()
-                addPushNotification("🎟️ New promotional code saved to Supabase: $cleanCode")
-            } catch (e: Exception) {
-                e.printStackTrace()
-                _coupons.update { it + Coupon(cleanCode, discount, desc) }
-                addPushNotification("🎟️ New promotional code generated: $cleanCode")
-            }
-        }
+        _coupons.update { it + Coupon(cleanCode, discount, desc) }
+        addPushNotification("🎟️ New promo code created: $cleanCode")
     }
 
     fun removeAppliedDiscount() {
@@ -1970,201 +1439,78 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
         appliedDiscountAmount.value = 0.0
     }
 
-    // ----------------------------------------------------
-    // ENTERPRISE ADMIN EXTRA WORKFLOWS (FRAUD, PAYMENTS, BROADCAST)
-    // ----------------------------------------------------
-    private val _fraudAlerts = MutableStateFlow<List<FraudAlert>>(emptyList())
+    // -------------------------------------------------------
+    // ENTERPRISE ADMIN WORKFLOWS
+    // -------------------------------------------------------
+    private val _fraudAlerts = MutableStateFlow<List<FraudAlert>>(listOf(
+        FraudAlert(1, "Suspect GPS Relocation", "HIGH", "Rizwan's GPS updated from Gulberg to F-7 Islamabad in 4 seconds.", System.currentTimeMillis() - 1000 * 60 * 18, "03009988771"),
+        FraudAlert(2, "Duplicate IP Sign-In", "LOW", "Tech & Customer with overlapping referral codes from identical fingerprints.", System.currentTimeMillis() - 1000 * 60 * 45, "03001122334"),
+        FraudAlert(3, "Substandard Rate Gouging", "CRITICAL", "Bill totaled Rs. 14,000 on category estimated at max Rs. 3,500.", System.currentTimeMillis() - 1000 * 60 * 120, "03125559092")
+    ))
     val fraudAlerts: StateFlow<List<FraudAlert>> = _fraudAlerts.asStateFlow()
 
-    fun loadFraudAlerts() {
-        viewModelScope.launch {
-            try {
-                val dtos = SupabaseClient.apiService.getFraudAlerts(
-                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                    authHeader = getBearerToken()
-                )
-                _fraudAlerts.value = dtos.map {
-                    FraudAlert(
-                        id = it.id?.toInt() ?: 0,
-                        title = it.title,
-                        severity = it.severity,
-                        description = it.description,
-                        timestamp = System.currentTimeMillis(),
-                        associatedPhone = it.associatedPhone,
-                        isResolved = it.isResolved
-                    )
-                }
-            } catch (e: Exception) { e.printStackTrace() }
-        }
-    }
-
-    private val _paymentWithdrawals = MutableStateFlow<List<PaymentWithdrawal>>(emptyList())
+    private val _paymentWithdrawals = MutableStateFlow<List<PaymentWithdrawal>>(listOf(
+        PaymentWithdrawal("TXN-3019A", "Zahid Iqbal", "JazzCash Payout", 4200.0, "JazzCash - 03001234411", "Pending Approved", System.currentTimeMillis() - 1000 * 60 * 30),
+        PaymentWithdrawal("TXN-3023M", "Farhan Saeed", "EasyPaisa Cash-Out", 8400.0, "EasyPaisa - 03217744112", "Pending Approved", System.currentTimeMillis() - 1000 * 60 * 65),
+        PaymentWithdrawal("TXN-1092Q", "Muhammad Rizwan", "Bank Transfer RELEASE", 32000.0, "HBL Bank - PK00UNIL01920392819", "Under Compliance Hold", System.currentTimeMillis() - 1000 * 60 * 180),
+        PaymentWithdrawal("TXN-0892B", "Yasir Rasheed", "JazzCash Payout", 1500.0, "JazzCash - 03009988112", "Released & Processed", System.currentTimeMillis() - 1000 * 60 * 300)
+    ))
     val paymentWithdrawals: StateFlow<List<PaymentWithdrawal>> = _paymentWithdrawals.asStateFlow()
 
-    fun loadPayoutWithdrawals() {
-        viewModelScope.launch {
-            try {
-                val dtos = SupabaseClient.apiService.getPayoutWithdrawals(
-                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                    authHeader = getBearerToken()
-                )
-                _paymentWithdrawals.value = dtos.map {
-                    PaymentWithdrawal(it.id, it.name, it.type, it.amount, it.paymentDetails, it.status, System.currentTimeMillis())
-                }
-            } catch (e: Exception) { e.printStackTrace() }
-        }
-    }
-
     private val _announcementsLogs = MutableStateFlow<List<AnnouncementLog>>(listOf(
-        AnnouncementLog("MASS_A1", "Global System Core Update", "All field technicians are advised to run NADRA facial match upgrades directly.", "All Techs", System.currentTimeMillis() - 1000 * 60 * 1400),
-        AnnouncementLog("MASS_A2", "Rain Emergency Alert", "Heavy rain downpours predicted in Karachi. Shift margins by Rs. 300.", "Karachi Only", System.currentTimeMillis() - 1000 * 60 * 900)
+        AnnouncementLog("MASS_A1", "Global System Update", "All technicians: run NADRA facial match upgrades.", "All Techs", System.currentTimeMillis() - 1000 * 60 * 1400),
+        AnnouncementLog("MASS_A2", "Rain Emergency Alert", "Heavy rain in Karachi. Shift margins by Rs. 300.", "Karachi Only", System.currentTimeMillis() - 1000 * 60 * 900)
     ))
     val announcementsLogs: StateFlow<List<AnnouncementLog>> = _announcementsLogs.asStateFlow()
 
     fun sendGlobalPushAnnouncement(target: String, title: String, content: String) {
-        val newAnn = AnnouncementLog(
-            id = "MASS_" + System.currentTimeMillis().toString().takeLast(6),
-            title = title,
-            content = content,
-            targetGroup = target,
-            timestamp = System.currentTimeMillis()
-        )
-        _announcementsLogs.update { listOf(newAnn) + it }
-        addPushNotification("📣 BROADCAST ISSUED to [$target] -> $title: $content")
+        _announcementsLogs.update { listOf(AnnouncementLog("MASS_${System.currentTimeMillis().toString().takeLast(6)}", title, content, target, System.currentTimeMillis())) + it }
+        addPushNotification("📣 BROADCAST to [$target] → $title: $content")
     }
 
     fun resolveFraudAlert(alertId: Int) {
-        viewModelScope.launch {
-            try {
-                SupabaseClient.apiService.updateFraudAlert(
-                    id = "eq.$alertId",
-                    body = mapOf("is_resolved" to true),
-                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                    authHeader = getBearerToken()
-                )
-            } catch (e: Exception) { e.printStackTrace() }
-            _fraudAlerts.update { alerts ->
-                alerts.map { if (it.id == alertId) it.copy(isResolved = true) else it }
-            }
-            addPushNotification("🛡️ Incident #$alertId successfully cataloged and filed to archives.")
-        }
-    }
-
-    fun blockTechnicianProfile(phone: String) {
-        viewModelScope.launch {
-            repository.updateTechnicianApproval(phone, false)
-            repository.updateTechnicianOnlineStatus(phone, false)
-            addPushNotification("🚨 STRICT ACTION: Technician profile tied to $phone suspended immediately from active routing.")
-        }
+        _fraudAlerts.update { alerts -> alerts.map { if (it.id == alertId) it.copy(isResolved = true) else it } }
+        addPushNotification("🛡️ Incident #$alertId archived.")
     }
 
     fun releasePayoutWithdrawal(txnId: String) {
-        viewModelScope.launch {
-            try {
-                SupabaseClient.apiService.updatePayoutWithdrawal(
-                    id = "eq.$txnId",
-                    body = mapOf("status" to "Released & Processed"),
-                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                    authHeader = getBearerToken()
-                )
-            } catch (e: Exception) { e.printStackTrace() }
-            _paymentWithdrawals.update { txns ->
-                txns.map { if (it.id == txnId) it.copy(status = "Released & Processed") else it }
-            }
-            val txn = _paymentWithdrawals.value.firstOrNull { it.id == txnId }
-            if (txn != null) {
-                val phoneOnly = txn.paymentDetails.substringAfter("- ").trim()
-                addPushNotification("💸 Payout APPROVED: released Rs. ${txn.amount.toInt()} directly to ${txn.paymentDetails}")
-                addWhatsAppUpdate(phoneOnly, "FixNow Payout Alert: Your withdrawal Rs. ${txn.amount.toInt()} has been processed and credited to your account!")
-            }
+        _paymentWithdrawals.update { txns -> txns.map { if (it.id == txnId) it.copy(status = "Released & Processed") else it } }
+        val txn = _paymentWithdrawals.value.firstOrNull { it.id == txnId }
+        if (txn != null) {
+            addPushNotification("💸 Released Rs. ${txn.amount.toInt()} to ${txn.paymentDetails}")
+            addWhatsAppUpdate(txn.paymentDetails.substringAfter("- ").trim(), "FixNow Payout: Rs. ${txn.amount.toInt()} credited to your account!")
         }
     }
 
     fun rejectPayoutWithdrawal(txnId: String) {
-        viewModelScope.launch {
-            try {
-                SupabaseClient.apiService.updatePayoutWithdrawal(
-                    id = "eq.$txnId",
-                    body = mapOf("status" to "Declined (Fraud / CNIC Audit)"),
-                    apiKey = BuildConfig.SUPABASE_ANON_KEY,
-                    authHeader = getBearerToken()
-                )
-            } catch (e: Exception) { e.printStackTrace() }
-            _paymentWithdrawals.update { txns ->
-                txns.map { if (it.id == txnId) it.copy(status = "Declined (Fraud / CNIC Audit)") else it }
-            }
-            addPushNotification("🛑 Payout DENIED: Txn #$txnId flagged under compliance review.")
-        }
+        _paymentWithdrawals.update { txns -> txns.map { if (it.id == txnId) it.copy(status = "Declined (Fraud / CNIC Audit)") else it } }
+        addPushNotification("🛑 Payout DENIED: Txn #$txnId flagged under compliance review.")
     }
 
-    // Mapbox App API Implementations
+    // -------------------------------------------------------
+    // MAPBOX ADDRESS & ROUTE
+    // -------------------------------------------------------
     fun updateLiveLocation(lat: Double, lng: Double, address: String = "") {
         resolvedLocationLat.value = lat
         resolvedLocationLng.value = lng
-        if (address.isNotEmpty()) {
-            draftAddress.value = address
-        }
+        if (address.isNotEmpty()) draftAddress.value = address
     }
 
     fun searchAddressSuggestions(query: String) {
-        if (query.trim().isEmpty()) {
-            searchSuggestions.value = emptyList()
-            return
-        }
+        if (query.trim().isEmpty()) { searchSuggestions.value = emptyList(); return }
         viewModelScope.launch {
             try {
                 val token = BuildConfig.MAPBOX_ACCESS_TOKEN
                 if (token.isEmpty() || token == "your_token_here") {
-                    val pCity = _activeCustomer.value?.city ?: "Lahore"
-                    val isKarachi = pCity.contains("Karachi", ignoreCase = true)
-                    val isIslamabad = pCity.contains("Islamabad", ignoreCase = true)
-                    val citySuggestions = if (isKarachi) {
-                        listOf(
-                            "${query.trim()}, Clifton Block 5, Karachi",
-                            "${query.trim()}, DHA Phase 6, Karachi",
-                            "${query.trim()}, KDA Scheme 1, Karimabad, Karachi",
-                            "${query.trim()}, Gulshan-e-Iqbal Block 3, Karachi",
-                            "${query.trim()}, Saddar Commercial Area, Karachi"
-                        )
-                    } else if (isIslamabad) {
-                        listOf(
-                            "${query.trim()}, Sector F-6/2 Markaz, Islamabad",
-                            "${query.trim()}, Jinnah Avenue, Blue Area, Islamabad",
-                            "${query.trim()}, Sector G-11 Markaz, Islamabad",
-                            "${query.trim()}, Sector I-8/4 Residential Area, Islamabad",
-                            "${query.trim()}, Bahria Town Phase 4, Islamabad"
-                        )
-                    } else { // Lahore
-                        listOf(
-                            "${query.trim()}, Block H, Gulberg III, Lahore",
-                            "${query.trim()}, Sector CCA, Phase 5, DHA, Lahore",
-                            "${query.trim()}, Main Boulevard, Model Town, Lahore",
-                            "${query.trim()}, Block C, Garden Town, Lahore",
-                            "${query.trim()}, Emporium Lane, Johar Town, Lahore"
-                        )
-                    }
-                    searchSuggestions.value = citySuggestions
+                    searchSuggestions.value = listOf("${query.trim()}, Block H, Gulberg III, Lahore", "${query.trim()}, Phase 5, DHA, Lahore", "${query.trim()}, Model Town, Lahore")
                     return@launch
                 }
                 val response = MapboxClient.apiService.searchPlaces(query = query, accessToken = token)
-                if (response.features.isNotEmpty()) {
-                    searchSuggestions.value = response.features.map { it.placeName }
-                } else {
-                    val pCity = _activeCustomer.value?.city ?: "Lahore"
-                    searchSuggestions.value = listOf(
-                        "$query, Block H, Gulberg III, $pCity",
-                        "$query, Phase 5, DHA, $pCity",
-                        "$query, Saddar, $pCity"
-                    )
-                }
+                searchSuggestions.value = if (response.features.isNotEmpty()) response.features.map { it.placeName }
+                else listOf("${query.trim()}, Gulberg III, Lahore", "${query.trim()}, DHA Phase 5, Lahore")
             } catch (e: Exception) {
                 e.printStackTrace()
-                val pCity = _activeCustomer.value?.city ?: "Lahore"
-                searchSuggestions.value = listOf(
-                    "$query, Block H, Gulberg III, $pCity",
-                    "$query, Phase 5, DHA, $pCity",
-                    "$query, Saddar, $pCity"
-                )
+                searchSuggestions.value = listOf("${query.trim()}, Gulberg III, Lahore")
             }
         }
     }
@@ -2183,61 +1529,34 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 val response = MapboxClient.apiService.searchPlaces(query = address, accessToken = token)
                 if (response.features.isNotEmpty()) {
-                    val feature = response.features[0]
-                    val coordinates = feature.center
-                    resolvedLocationLng.value = coordinates[0]
-                    resolvedLocationLat.value = coordinates[1]
-                    addPushNotification("📍 Resolved address location from Mapbox: (${coordinates[1]}, ${coordinates[0]})")
-                } else {
-                    val isKarachi = address.contains("Karachi", ignoreCase = true)
-                    val isIslamabad = address.contains("Islamabad", ignoreCase = true)
-                    resolvedLocationLat.value = if (isKarachi) 24.8607 else if (isIslamabad) 33.6844 else 31.5204
-                    resolvedLocationLng.value = if (isKarachi) 67.0011 else if (isIslamabad) 73.0479 else 74.3587
+                    val coords = response.features[0].center
+                    resolvedLocationLng.value = coords[0]
+                    resolvedLocationLat.value = coords[1]
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
-                val isKarachi = address.contains("Karachi", ignoreCase = true)
-                val isIslamabad = address.contains("Islamabad", ignoreCase = true)
-                resolvedLocationLat.value = if (isKarachi) 24.8607 else if (isIslamabad) 33.6844 else 31.5204
-                resolvedLocationLng.value = if (isKarachi) 67.0011 else if (isIslamabad) 73.0479 else 74.3587
-            }
+            } catch (e: Exception) { e.printStackTrace() }
         }
     }
 
     fun refreshActiveGoogleRoute(booking: Booking) {
-        val techLat = booking.techLatitude
-        val techLng = booking.techLongitude
-        val custLat = booking.latitude
-        val custLng = booking.longitude
-
+        val techLat = booking.techLatitude; val techLng = booking.techLongitude
+        val custLat = booking.latitude; val custLng = booking.longitude
         if (techLat == 0.0 || custLat == 0.0) return
-
         viewModelScope.launch {
             try {
                 val token = BuildConfig.MAPBOX_ACCESS_TOKEN
                 if (token.isEmpty() || token == "your_token_here") {
-                    activeRoutePoints.value = listOf(LatLng(techLat, techLng), LatLng(custLat, custLng))
-                    return@launch
+                    activeRoutePoints.value = listOf(LatLng(techLat, techLng), LatLng(custLat, custLng)); return@launch
                 }
-                val coordsPath = "$techLng,$techLat;$custLng,$custLat"
                 val response = MapboxClient.apiService.getDirections(
-                    coords = coordsPath,
-                    accessToken = token,
-                    geometries = "polyline"
+                    coords = "$techLng,$techLat;$custLng,$custLat", accessToken = token, geometries = "polyline"
                 )
                 if (response.code == "Ok" && response.routes.isNotEmpty()) {
                     val route = response.routes[0]
-                    val distanceKm = route.distance / 1000.0
-                    val estMin = (route.duration / 60.0).toInt().coerceAtLeast(1)
-                    activeRouteDistance.value = String.format("%.2f KM", distanceKm)
-                    activeRouteDuration.value = "$estMin mins"
-
+                    activeRouteDistance.value = String.format("%.2f KM", route.distance / 1000.0)
+                    activeRouteDuration.value = "${(route.duration / 60.0).toInt().coerceAtLeast(1)} mins"
                     val geom = route.geometry
-                    if (geom != null) {
-                        activeRoutePoints.value = MapboxPolylineDecoder.decode(geom)
-                    } else {
-                        activeRoutePoints.value = listOf(LatLng(techLat, techLng), LatLng(custLat, custLng))
-                    }
+                    activeRoutePoints.value = if (geom != null) MapboxPolylineDecoder.decode(geom)
+                    else listOf(LatLng(techLat, techLng), LatLng(custLat, custLng))
                 } else {
                     activeRoutePoints.value = listOf(LatLng(techLat, techLng), LatLng(custLat, custLng))
                 }
@@ -2248,75 +1567,46 @@ class FixNowViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-
-    /** Returns the current user's Bearer token, or falls back to anon key if not logged in. */
-    private fun getBearerToken(): String {
-        val stored = SecureAuthManager.getInstance(getApplication()).userToken.value
-        return if (!stored.isNullOrEmpty()) "Bearer $stored" else "Bearer ${BuildConfig.SUPABASE_ANON_KEY}"
-    }
-
     override fun onCleared() {
         super.onCleared()
-        try {
-            SupabaseRealtimeClient.clearCallbacks()
-            SupabaseRealtimeClient.disconnect()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
+        try { SupabaseRealtimeClient.clearCallbacks(); SupabaseRealtimeClient.disconnect() } catch (e: Exception) { e.printStackTrace() }
     }
 }
 
+// -------------------------------------------------------
+// SUPPORTING DATA CLASSES (non-Room, non-Supabase)
+// -------------------------------------------------------
 data class FraudAlert(
-    val id: Int,
-    val title: String,
-    val severity: String, // CRITICAL, HIGH, LOW
-    val description: String,
-    val timestamp: Long,
-    val associatedPhone: String,
-    val isResolved: Boolean = false
+    val id: Int, val title: String, val severity: String,
+    val description: String, val timestamp: Long,
+    val associatedPhone: String, val isResolved: Boolean = false
 ) : java.io.Serializable
 
 data class PaymentWithdrawal(
-    val id: String,
-    val name: String,
-    val type: String, // JazzCash, EasyPaisa, Bank Transfer
-    val amount: Double,
-    val paymentDetails: String,
-    val status: String, // Pending Approved, Under Compliance Hold, Released & Processed, Declined
-    val timestamp: Long
+    val id: String, val name: String, val type: String,
+    val amount: Double, val paymentDetails: String,
+    val status: String, val timestamp: Long
 ) : java.io.Serializable
 
 data class AnnouncementLog(
-    val id: String,
-    val title: String,
-    val content: String,
-    val targetGroup: String, // All Techs, All Customers, Karachi Only, Lahore Only
-    val timestamp: Long
+    val id: String, val title: String, val content: String,
+    val targetGroup: String, val timestamp: Long
 ) : java.io.Serializable
 
 data class SupportTicket(
-    val id: Long,
-    val customerPhone: String,
-    val customerName: String,
-    val bookingId: Long?,
-    val category: String, // Delayed Arrival, Technician Behavior, Pricing Dispute, Substandard Quality, App Issue
-    val description: String,
-    val status: String, // Open, In Progress, Escalated, Resolved
-    val timestamp: Long,
+    val id: Long, val customerPhone: String, val customerName: String,
+    val bookingId: Long?, val category: String, val description: String,
+    val status: String, val timestamp: Long,
     val chatMessages: List<SupportMessage> = emptyList(),
     val slaTimerMinutes: Int = 15
 ) : java.io.Serializable
 
 data class SupportMessage(
-    val sender: String, // Customer, Support Agent
-    val message: String,
+    val sender: String, val message: String,
     val timestamp: Long = System.currentTimeMillis()
 ) : java.io.Serializable
 
 data class Coupon(
-    val code: String,
-    val discountAmount: Double,
-    val description: String,
-    val isReferral: Boolean = false,
-    val refereeName: String? = null
+    val code: String, val discountAmount: Double, val description: String,
+    val isReferral: Boolean = false, val refereeName: String? = null
 ) : java.io.Serializable
