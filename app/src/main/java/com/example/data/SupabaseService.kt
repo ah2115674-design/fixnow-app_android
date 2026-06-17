@@ -20,44 +20,44 @@ import java.util.concurrent.TimeUnit
 // ----------------------------------------------------
 @JsonClass(generateAdapter = true)
 data class CustomerMetadata(
-    @Json(name = "name")  val name: String,
-    @Json(name = "phone") val phone: String,
-    @Json(name = "city")  val city: String,
-    @Json(name = "role")  val role: String = "customer"
+    @param:Json(name = "name")  val name: String,
+    @param:Json(name = "phone") val phone: String,
+    @param:Json(name = "city")  val city: String,
+    @param:Json(name = "role")  val role: String = "customer"
 )
 
 @JsonClass(generateAdapter = true)
 data class TechMetadata(
-    @Json(name = "name")     val name: String,
-    @Json(name = "phone")    val phone: String,
-    @Json(name = "city")     val city: String,
-    @Json(name = "category") val category: String,
-    @Json(name = "cnic")     val cnic: String,
-    @Json(name = "role")     val role: String = "technician"
+    @param:Json(name = "name")     val name: String,
+    @param:Json(name = "phone")    val phone: String,
+    @param:Json(name = "city")     val city: String,
+    @param:Json(name = "category") val category: String,
+    @param:Json(name = "cnic")     val cnic: String,
+    @param:Json(name = "role")     val role: String = "technician"
 )
 
 @JsonClass(generateAdapter = true)
 data class CustomerSignUpOptions(
-    @Json(name = "data") val data: CustomerMetadata
+    @param:Json(name = "data") val data: CustomerMetadata
 )
 
 @JsonClass(generateAdapter = true)
 data class TechSignUpOptions(
-    @Json(name = "data") val data: TechMetadata
+    @param:Json(name = "data") val data: TechMetadata
 )
 
 @JsonClass(generateAdapter = true)
 data class SupabaseCustomerSignUpRequest(
     val email: String,
     val password: String,
-    @Json(name = "options") val options: CustomerSignUpOptions
+    @param:Json(name = "options") val options: CustomerSignUpOptions
 )
 
 @JsonClass(generateAdapter = true)
 data class SupabaseTechSignUpRequest(
     val email: String,
     val password: String,
-    @Json(name = "options") val options: TechSignUpOptions
+    @param:Json(name = "options") val options: TechSignUpOptions
 )
 
 @JsonClass(generateAdapter = true)
@@ -68,22 +68,22 @@ data class SupabaseSignInRequest(
 
 @JsonClass(generateAdapter = true)
 data class SupabaseGoogleSignInRequest(
-    @Json(name = "provider") val provider: String = "google",
-    @Json(name = "id_token") val idToken: String
+    @param:Json(name = "provider") val provider: String = "google",
+    @param:Json(name = "id_token") val idToken: String
 )
 
 @JsonClass(generateAdapter = true)
 data class SupabaseUser(
     val id: String,
     val email: String?,
-    @Json(name = "user_metadata") val userMetadata: Map<String, String>?
+    @param:Json(name = "user_metadata") val userMetadata: Map<String, String>?
 )
 
 @JsonClass(generateAdapter = true)
 data class SupabaseAuthResponse(
-    @Json(name = "access_token") val accessToken: String?,
-    @Json(name = "token_type")   val tokenType: String?,
-    @Json(name = "user")         val user: SupabaseUser?
+    @param:Json(name = "access_token") val accessToken: String?,
+    @param:Json(name = "token_type")   val tokenType: String?,
+    @param:Json(name = "user")         val user: SupabaseUser?
 )
 
 // ----------------------------------------------------
@@ -104,16 +104,16 @@ data class TechnicianDto(
     val phone: String,
     val name: String,
     val category: String,
-    @Json(name = "sub_category")  val subCategory: String?,
+    @param:Json(name = "sub_category")  val subCategory: String?,
     val city: String,
     val cnic: String,
-    @Json(name = "selfie_url")    val selfieUrl: String?,
-    @Json(name = "bank_details")  val bankDetails: String?,
-    @Json(name = "is_approved")   val isApproved: Boolean,
-    @Json(name = "is_online")     val isOnline: Boolean,
+    @param:Json(name = "selfie_url")    val selfieUrl: String?,
+    @param:Json(name = "bank_details")  val bankDetails: String?,
+    @param:Json(name = "is_approved")   val isApproved: Boolean,
+    @param:Json(name = "is_online")     val isOnline: Boolean,
     val rating: Double,
-    @Json(name = "total_jobs")    val totalJobs: Int,
-    @Json(name = "acceptance_rate") val acceptanceRate: Double,
+    @param:Json(name = "total_jobs")    val totalJobs: Int,
+    @param:Json(name = "acceptance_rate") val acceptanceRate: Double,
     val latitude: Double,
     val longitude: Double
 )
@@ -121,39 +121,39 @@ data class TechnicianDto(
 @JsonClass(generateAdapter = true)
 data class BookingDto(
     val id: Long? = null,
-    @Json(name = "service_category")  val serviceCategory: String,
-    @Json(name = "service_name")      val serviceName: String,
-    @Json(name = "issue_description") val issueDescription: String,
-    @Json(name = "customer_id")       val customerId: String,
-    @Json(name = "customer_phone")    val customerPhone: String,
-    @Json(name = "customer_name")     val customerName: String,
-    @Json(name = "customer_address")  val customerAddress: String,
-    @Json(name = "customer_city")     val customerCity: String,
-    @Json(name = "preferred_time")    val preferredTime: String,
-    @Json(name = "payment_method")    val paymentMethod: String,
+    @param:Json(name = "service_category")  val serviceCategory: String,
+    @param:Json(name = "service_name")      val serviceName: String,
+    @param:Json(name = "issue_description") val issueDescription: String,
+    @param:Json(name = "customer_id")       val customerId: String,
+    @param:Json(name = "customer_phone")    val customerPhone: String,
+    @param:Json(name = "customer_name")     val customerName: String,
+    @param:Json(name = "customer_address")  val customerAddress: String,
+    @param:Json(name = "customer_city")     val customerCity: String,
+    @param:Json(name = "preferred_time")    val preferredTime: String,
+    @param:Json(name = "payment_method")    val paymentMethod: String,
     val price: Double,
     val status: String,
-    @Json(name = "technician_id")     val technicianId: String? = null,
-    @Json(name = "technician_phone")  val technicianPhone: String? = null,
-    @Json(name = "technician_name")   val technicianName: String? = null,
+    @param:Json(name = "technician_id")     val technicianId: String? = null,
+    @param:Json(name = "technician_phone")  val technicianPhone: String? = null,
+    @param:Json(name = "technician_name")   val technicianName: String? = null,
     val rating: Int = 0,
-    @Json(name = "review_comment")    val reviewComment: String? = null,
+    @param:Json(name = "review_comment")    val reviewComment: String? = null,
     val latitude: Double,
     val longitude: Double,
     // FIX: tech coordinates start at (0,0) not customer location.
     // They are only set meaningfully once a tech is matched/accepts.
-    @Json(name = "tech_latitude")     val techLatitude: Double = 0.0,
-    @Json(name = "tech_longitude")    val techLongitude: Double = 0.0,
-    @Json(name = "declined_technicians") val declinedTechnicians: String = "",
-    @Json(name = "is_manual_assign") val isManualAssign: Boolean = false
+    @param:Json(name = "tech_latitude")     val techLatitude: Double = 0.0,
+    @param:Json(name = "tech_longitude")    val techLongitude: Double = 0.0,
+    @param:Json(name = "declined_technicians") val declinedTechnicians: String = "",
+    @param:Json(name = "is_manual_assign") val isManualAssign: Boolean = false
 )
 
 @JsonClass(generateAdapter = true)
 data class EarningDto(
     val id: Long? = null,
-    @Json(name = "technician_id")    val technicianId: String,
-    @Json(name = "technician_phone") val technicianPhone: String,
-    @Json(name = "booking_id")       val bookingId: Long,
+    @param:Json(name = "technician_id")    val technicianId: String,
+    @param:Json(name = "technician_phone") val technicianPhone: String,
+    @param:Json(name = "booking_id")       val bookingId: Long,
     val category: String,
     val amount: Double
 )
@@ -165,21 +165,21 @@ data class EarningDto(
 data class BookingReservationResponse(
     val success: Boolean,
     val message: String,
-    @Json(name = "updated_status") val updatedStatus: String?
+    @param:Json(name = "updated_status") val updatedStatus: String?
 )
 
 @JsonClass(generateAdapter = true)
 data class AcceptBookingParams(
-    @Json(name = "p_booking_id")    val bookingId: Long,
-    @Json(name = "p_technician_id") val technicianId: String
+    @param:Json(name = "p_booking_id")    val bookingId: Long,
+    @param:Json(name = "p_technician_id") val technicianId: String
 )
 
 @JsonClass(generateAdapter = true)
 data class TechDiscoveryParams(
-    @Json(name = "p_booking_latitude")  val bookingLatitude: Double,
-    @Json(name = "p_booking_longitude") val bookingLongitude: Double,
-    @Json(name = "p_city")             val city: String,
-    @Json(name = "p_category")         val category: String
+    @param:Json(name = "p_booking_latitude")  val bookingLatitude: Double,
+    @param:Json(name = "p_booking_longitude") val bookingLongitude: Double,
+    @param:Json(name = "p_city")             val city: String,
+    @param:Json(name = "p_category")         val category: String
 )
 
 @JsonClass(generateAdapter = true)

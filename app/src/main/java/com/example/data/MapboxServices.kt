@@ -33,7 +33,7 @@ data class MapboxGeocodingResponse(
 data class MapboxFeature(
     val id: String,
     val type: String,
-    @Json(name = "place_name") val placeName: String,
+    @param:Json(name = "place_name") val placeName: String,
     val text: String,
     val center: List<Double> // [longitude, latitude]
 )
